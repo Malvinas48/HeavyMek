@@ -89,8 +89,7 @@ equipment.txt
 /megamek/docs/README.md
 /megamek/docs/LICENSE*
 
-# No need to re-commit this folder
-/megamek/data
+# HeavyMek keeps its trimmed data folder (megamek/data) in the repository.
 units.cache
 
 # Local design / issue notes (working docs, not part of the repo)
