@@ -7,7 +7,7 @@ These notes are the rulebook as a programmer needs it: every rule, number and ta
 | [01-core-movement.md](01-core-movement.md) | Dice, skills, crews, the datacard, the combat round, command points, actions, movement, terrain, elevation, line of sight, sensors, firing arcs |
 | [02-combat-damage.md](02-combat-damage.md) | Attack and defense rolls, every modifier, physical attacks, indirect fire, rate of fire, damage, the systems damage tables, worked examples |
 | [03-units-weapons.md](03-units-weapons.md) | The vehicle stat block, weapons, perks and flaws, threat values, infantry in brief |
-| [units/](units/) | Draft unit files for the first duel (Hunter and Jäger) |
+| [../../megamek/data/heavygear/units/](../../megamek/data/heavygear/units/) | The unit files for the first duel (Hunter and Jäger), now game data |
 
 ## How to read them
 
@@ -17,7 +17,7 @@ These notes are the rulebook as a programmer needs it: every rule, number and ta
 
 ## Which book wins
 
-**B, the 1997 rulebook.** It's the hex-map game you chose. Where B says nothing, A fills the gap. Rules that only A has (Hull Down, Standby, the Multiple Attacker Penalty, picking up guns, the auxiliary-systems damage table) are left out at first and can come back later as game options.
+**B, the 1997 rulebook.** It's the hex-map game you chose. A is written for miniatures on a tabletop, not for hex grids, so it's only consulted where B says nothing. Rules that only A has (Hull Down, Standby, the Multiple Attacker Penalty, picking up guns, the auxiliary-systems damage table) are left out at first and can come back later as game options.
 
 ## How Heavy Gear maps onto MegaMek
 
@@ -60,3 +60,19 @@ Each topic file ends with its full list. These matter first, for the duel, so he
 - **Line of sight running exactly along a hexside:** the defender picks the hex that's better for them, as MegaMek does for BattleTech.
 - **Hexes on the boundary between the front and rear arcs:** they count as front.
 - **Odd Combat Speed and "half speed":** compare MP spent x 2 with Combat MP, so no rounding is needed.
+
+### Rulings built into Stage 2
+
+The first duel needed answers to more of the open questions. Until you say otherwise, HeavyMek plays them like this (the code comments cite the same sections):
+
+- **Who goes first:** a side that may choose lets the other side go first, at set-up and every round. The game can't ask yet.
+- **Damage the attacker or defender places** (the odd or even die): the attacker puts it where it hurts most (the strongest weapon, the movement system in use), the defender where it hurts least.
+- **Initiative ties** are rolled again. A fumble loses; if both sides fumble they roll again.
+- **The announced speed** is worked out from the MP actually spent: the slowest speed band that covers them. A shot fired after the last move of an activation that ends by shifting up to Top Speed takes the Top Speed penalty.
+- **First round:** a unit placed at Stationary defends as if it had moved 0 hexes.
+- **Sharp turns at Top Speed:** a crash does Light damage on 1-3 and Heavy damage on 4-6, as in the turning rules (B p.133). A skid costs no MP but counts as a hex moved. A unit can't skid off the map or into a hex with another unit in it; it then completes the turn where it is (ramming arrives in Stage 3).
+- **Arcs:** a target in the shooter's own hex is inside every firing arc and attacks it from the Front. Hexes exactly abeam (90 degrees) are inside both the forward and the rear firing arcs.
+- **Area effect:** concussion is half the Damage Multiplier, rounded down. A fumbled attack does no concussion.
+- **A fumbled defense against an attack total of 0** is a hit with a Margin of Success of 0, so it does no damage.
+- **Systems damage:** a 6 rolled during "roll twice more" keeps chaining; the Heavy +1 also applies to the extra subtable rolls; casualties round down with a minimum of 1; destroyed Fire Control gives -5 in place of its rating; "half the remaining MP" halves Top Speed; a Gear with no crew left is out of the fight and its wreck stays on the map.
+

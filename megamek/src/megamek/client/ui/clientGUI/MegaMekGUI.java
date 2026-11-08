@@ -76,6 +76,7 @@ import megamek.SuiteConstants;
 import megamek.Version;
 import megamek.client.Client;
 import megamek.client.IClient;
+import megamek.client.HGClient;
 import megamek.client.SBFClient;
 import megamek.client.bot.AIType;
 import megamek.client.bot.BotClient;
@@ -102,6 +103,7 @@ import megamek.client.ui.dialogs.helpDialogs.MMReadMeHelpDialog;
 import megamek.client.ui.dialogs.randomArmy.AbstractRandomArmyDialog;
 import megamek.client.ui.dialogs.randomArmy.MMMainMenuRandomArmyDialog;
 import megamek.client.ui.dialogs.scenario.ScenarioChooserDialog;
+import megamek.client.ui.heavyGear.HGClientGUI;
 import megamek.client.ui.dialogs.unitSelectorDialogs.MainMenuUnitBrowserDialog;
 import megamek.client.ui.enums.DialogResult;
 import megamek.client.ui.panels.skinEditor.SkinEditorMainGUIPanel;
@@ -143,6 +145,7 @@ import megamek.common.weapons.handlers.WeaponOrderHandler;
 import megamek.logging.MMLogger;
 import megamek.server.IGameManager;
 import megamek.server.Server;
+import megamek.server.heavyGear.HGGameManager;
 import megamek.server.sbf.SBFGameManager;
 import megamek.server.totalWarfare.TWGameManager;
 import megamek.utilities.xml.MMXMLUtility;
@@ -442,7 +445,7 @@ public class MegaMekGUI implements IPreferenceChangeListener {
               true);
         connectB.setActionCommand(ClientGUI.FILE_GAME_CONNECT);
         connectB.addActionListener(actionListener);
-        MegaMekButton connectSBF = new MegaMekButton("Connect to SBF", UIComponents.MainMenuButton.getComp(), true);
+        MegaMekButton connectSBF = new MegaMekButton("Connect (BattleTech)", UIComponents.MainMenuButton.getComp(), true);
         connectSBF.setActionCommand(ClientGUI.FILE_GAME_CONNECT_SBF);
         connectSBF.addActionListener(actionListener);
         MegaMekButton botB = new MegaMekButton(Messages.getString("MegaMek.ConnectAsBot.label"),
@@ -1099,7 +1102,9 @@ public class MegaMekGUI implements IPreferenceChangeListener {
     }
 
     private IGameManager getGameManager(GameType gameType) {
-        if (gameType == GameType.SBF) {
+        if (gameType == GameType.HG) {
+            return new HGGameManager();
+        } else if (gameType == GameType.SBF) {
             return new SBFGameManager();
         }
 
@@ -1107,7 +1112,9 @@ public class MegaMekGUI implements IPreferenceChangeListener {
     }
 
     private IClientGUI getClientGUI(GameType gameType, IClient client, MegaMekController controller) {
-        if (gameType == GameType.SBF) {
+        if (gameType == GameType.HG) {
+            return new HGClientGUI((HGClient) client, controller);
+        } else if (gameType == GameType.SBF) {
             return new SBFClientGUI((SBFClient) client, controller);
         }
 
@@ -1115,7 +1122,9 @@ public class MegaMekGUI implements IPreferenceChangeListener {
     }
 
     private IClient getClient(GameType gameType, String playerName, String host, int port) {
-        if (gameType == GameType.SBF) {
+        if (gameType == GameType.HG) {
+            return new HGClient(playerName, host, port);
+        } else if (gameType == GameType.SBF) {
             return new SBFClient(playerName, host, port);
         }
 
@@ -1473,6 +1482,15 @@ public class MegaMekGUI implements IPreferenceChangeListener {
                 return;
             }
 
+            if ((scenario.getGameType() == GameType.HG)
+                  && Arrays.stream(sd.playerTypes).anyMatch(type -> type == ScenarioDialog.T_BOT)) {
+                // HeavyMek: there is no Heavy Gear computer opponent yet (Stage 7)
+                JOptionPane.showMessageDialog(frame,
+                      "Heavy Gear has no computer opponent yet. Set the other sides to Other Human; their players "
+                            + "join with Connect to a Game.", "HeavyMek", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+
             HostDialog hd = new HostDialog(frame);
             if (!sd.localName.isEmpty()) {
                 hasSlot = true;
@@ -1559,7 +1577,8 @@ public class MegaMekGUI implements IPreferenceChangeListener {
         var cd = new ConnectDialog(frame);
         cd.setVisible(true);
         if (cd.isConfirmed() && cd.dataValidation("MegaMek.ConnectDialog.title")) {
-            startClient(cd.getPlayerName(), cd.getServerAddress(), cd.getPort());
+            // HeavyMek: Connect joins a Heavy Gear game. Use the player name of a side in the host's scenario.
+            startClient(cd.getPlayerName(), cd.getServerAddress(), cd.getPort(), GameType.HG);
         }
     }
 
@@ -1570,7 +1589,8 @@ public class MegaMekGUI implements IPreferenceChangeListener {
         var cd = new ConnectDialog(frame);
         cd.setVisible(true);
         if (cd.isConfirmed() && cd.dataValidation("MegaMek.ConnectDialog.title")) {
-            startClient(cd.getPlayerName(), cd.getServerAddress(), cd.getPort(), GameType.SBF);
+            // HeavyMek: this button now joins a BattleTech (Total Warfare) game, until BattleTech is removed
+            startClient(cd.getPlayerName(), cd.getServerAddress(), cd.getPort(), GameType.TW);
         }
     }
 
