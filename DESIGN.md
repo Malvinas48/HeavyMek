@@ -14,14 +14,15 @@ This is a living document. It records the decisions made so far, how the pieces 
 | 2026-11-08 | Claude **builds and tests in the cloud** once Maven Central and the Gradle sites are allowed | Writing Java against about 950,000 lines of code without compiling would be guesswork. |
 | 2026-11-08 | Gears, weapons and scenarios are **plain text files** | They're easy to read, tweak and add to by hand. |
 | 2026-11-08 | The repository stays **private** | Heavy Gear's unit stats are Dream Pod 9's material. |
-| 2026-11-08 | Where the books differ, the **1997 rulebook** wins; the **2005 Tactical Miniatures Rules** fill gaps | The 1997 rules are the hex-map game chosen. The 2005 book is Dream Pod 9's later revision of the same game: it has clean text and covers things the 1997 book leaves out. Both count one movement point as one hex (one hex = 50 m). (Revised the same day: the 2005 book was first chosen as the main text.) |
+| 2026-11-08 | Where the books differ, the **1997 rulebook** wins | The 1997 rules are the hex-map game you chose. The 2005 Tactical Miniatures Rules are for playing with miniatures on a tabletop, not on a hex grid, so they're only consulted where the rulebook says nothing. (Revised the same day: the 2005 book was briefly the main text; you confirmed the rulebook wins.) |
 | 2026-11-08 | Keep a trimmed copy of MegaMek's data in `megamek/data` (about 150 MB) | One clone is enough to build and play; no separate data repository. |
+| 2026-11-08 | Units appear on the board as **drawn tokens** (player colour, name, facing tip, movement mode, damage boxes) | No artwork needed to start. Each unit file can later name its own picture (an optional `image:` line) once there's art of our own. |
 | 2026-11-08 | Default terrain tileset: MegaMek's **saxarba** | The best-looking tileset. The lighter ones (27 MB) can replace it if the repository gets too big. |
 
 ## Sources
 
 - *Heavy Gear Rulebook, 2nd Edition* (DP9-101, 1997): the hex-map tactical rules (chapter 7) and the Field Guide with Gear and weapon stats. It wins where the books differ. It's sold as a PDF on DriveThruRPG.
-- *Heavy Gear Tactical Miniatures Rules, 2nd Edition* (Dream Pod 9, 2005): fills the gaps and clarifies the rules.
+- *Heavy Gear Tactical Miniatures Rules, 2nd Edition* (Dream Pod 9, 2005): rules for tabletop miniatures, not hex maps. Only consulted where the rulebook says nothing.
 - *Terra Nova Companion*: setting background (cities and regions), for scenario flavour later.
 - *Technical Manual, 2nd Edition* (DP9-104, a "Heavy Gear Revitalized" PDF on DriveThruRPG) covers vehicle construction and technology, for later stages.
 - More Gear stats will come from the 2nd Edition vehicle books in a later stage.

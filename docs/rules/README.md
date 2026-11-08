@@ -17,7 +17,7 @@ These notes are the rulebook as a programmer needs it: every rule, number and ta
 
 ## Which book wins
 
-**B, the 1997 rulebook.** It's the hex-map game you chose. Where B says nothing, A fills the gap. Rules that only A has (Hull Down, Standby, the Multiple Attacker Penalty, picking up guns, the auxiliary-systems damage table) are left out at first and can come back later as game options.
+**B, the 1997 rulebook.** It's the hex-map game you chose. A is written for miniatures on a tabletop, not for hex grids, so it's only consulted where B says nothing. Rules that only A has (Hull Down, Standby, the Multiple Attacker Penalty, picking up guns, the auxiliary-systems damage table) are left out at first and can come back later as game options.
 
 ## How Heavy Gear maps onto MegaMek
 
