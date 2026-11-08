@@ -130,12 +130,8 @@ public class HostDialog extends AbstractGameConnectionDialog {
         addOptionRow(middlePanel, c, serverPassLabel, serverPassField);
         addOptionRow(middlePanel, c, portLabel, getPortField());
 
-        c.gridwidth = GridBagConstraints.REMAINDER;
-        c.anchor = GridBagConstraints.WEST;
-        middlePanel.add(chkRegister, c);
-
-        addOptionRow(middlePanel, c, metaserverLabel, metaserverField);
-
+        // HeavyMek: MegaMek's server browser lists MegaMek games, so the "Register Game" checkbox and the server
+        // browser address are not shown. The controls still exist so the rest of the dialog works unchanged.
         return middlePanel;
     }
     //endregion Initialization

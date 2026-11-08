@@ -249,7 +249,7 @@ public class MegaMekGUI implements IPreferenceChangeListener {
             ToolTipManager.sharedInstance().setDismissDelay(GUIPreferences.getInstance().getTooltipDismissDelay());
         }
 
-        frame = new JFrame("MegaMek");
+        frame = new JFrame("HeavyMek");
         frame.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {

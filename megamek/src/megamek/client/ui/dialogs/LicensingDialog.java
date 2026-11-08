@@ -45,7 +45,6 @@ import javax.swing.JScrollPane;
 import javax.swing.border.EmptyBorder;
 import javax.swing.event.HyperlinkEvent;
 
-import megamek.MMConstants;
 import megamek.client.ui.Messages;
 import megamek.client.ui.buttons.MMButton;
 import megamek.client.ui.clientGUI.GUIPreferences;
@@ -78,7 +77,6 @@ public class LicensingDialog extends AbstractButtonDialog {
      */
     public LicensingDialog(JFrame frame) {
         super(frame, "LicensingDialog", "LicensingDialog.title");
-        setTitle(getTitle() + " " + MMConstants.VERSION);
         initialize();
         configureCloseActions();
     }
@@ -162,18 +160,12 @@ public class LicensingDialog extends AbstractButtonDialog {
      */
     public static String buildLegalHtml() {
         String wikiUrl = Messages.getString("LicensingDialog.wikiUrl");
-        String gameContentRulesUrl = Messages.getString("LicensingDialog.gameContentRulesUrl");
-        String gameContentRulesText = Messages.getString("LicensingDialog.gameContentRulesText");
-        String discordUrl = Messages.getString("LicensingDialog.discordUrl");
-        String discordText = Messages.getString("LicensingDialog.discordText");
 
+        // HeavyMek: no Microsoft content-rules link (that covers BattleTech) and no MegaMek Discord invitation.
         return "<p>" + Messages.getString("LicensingDialog.disclaimer") + "</p>"
-              + "<p>" + Messages.getString("LicensingDialog.licensing")
-              + " <a href=\"" + gameContentRulesUrl + "\">" + gameContentRulesText + "</a>.</p>"
+              + "<p>" + Messages.getString("LicensingDialog.licensing") + "</p>"
               + "<p>" + Messages.getString("LicensingDialog.wiki")
               + " <a href=\"" + wikiUrl + "\">" + wikiUrl + "</a></p>"
-              + "<p>" + Messages.getString("LicensingDialog.community")
-              + " <a href=\"" + discordUrl + "\">" + discordText + "</a>.</p>"
               + "<p><small><i>" + Messages.getString("LicensingDialog.trademark")
               + "</i></small></p>";
     }

@@ -142,7 +142,8 @@ public class ClientPreferences extends PreferenceStoreProxy {
         store.setDefault(DATA_DIRECTORY, "data");
         store.setDefault(LOG_DIRECTORY, "logs");
         store.setDefault(MEK_DIRECTORY, store.getDefaultString(DATA_DIRECTORY) + File.separator + "mekfiles");
-        store.setDefault(METASERVER_NAME, "https://api.megamek.org/servers/announce");
+        // HeavyMek: no server browser address, so games are never announced on MegaMek's server list.
+        store.setDefault(METASERVER_NAME, "");
         store.setDefault(GAME_LOG_KEEP, true);
         store.setDefault(GAME_LOG_FILENAME, "gamelog.html");
         store.setDefault(AUTO_RESOLVE_GAME_LOG_FILENAME, "simulation.html");
