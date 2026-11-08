@@ -1,0 +1,325 @@
+/*
+ * Copyright (C) 2025-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+package megamek.common.compute;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import jakarta.annotation.Nullable;
+import megamek.common.ECMInfo;
+import megamek.common.LosEffects;
+import megamek.common.equipment.EquipmentActivation;
+import megamek.common.game.Game;
+import megamek.common.units.Entity;
+import megamek.common.units.Targetable;
+
+/**
+ * Contains utility methods for finding a valid C3 spotter for an attack, i.e. a unit with better range than the actual
+ * attacker.
+ */
+public class ComputeC3Spotter {
+
+    /**
+     * Returns the closest unit to the target that has a working C3-type connection to the attacker, i.e., the best unit
+     * in a C3-type network of the attacker for range calculation. The calculation includes C3, C3i, Naval C3 and Nova.
+     * If the attacker has no working C3 system or connection or no other unit is placed better or in any other case
+     * where no better C3 spotter can be found, the attacker itself is returned.
+     *
+     * @param attacker The firing unit
+     * @param target   The target of the potential attack
+     * @param game     The game
+     *
+     * @return A C3-type spotter or the attacker itself if no spotters are found
+     */
+    static Entity findC3Spotter(Game game, Entity attacker, Targetable target) {
+        return findC3Spotter(game, attacker, target, null);
+    }
+
+    /**
+     * Same as {@link #findC3Spotter(Game, Entity, Targetable)}, but accepts a precomputed list of ECM information for
+     * all game entities. Computing that list scans the entire game and is expensive; callers that evaluate many attacks
+     * in a row (bots, to-hit previews) should compute it once and pass it in.
+     *
+     * @param attacker   The firing unit
+     * @param target     The target of the potential attack
+     * @param game       The game
+     * @param allECMInfo Precomputed ECM information for all game entities, as returned by
+     *                   {@link ComputeECM#computeAllEntitiesECMInfo(List)}, or {@code null} to compute it on demand
+     *
+     * @return A C3-type spotter or the attacker itself if no spotters are found
+     */
+    static Entity findC3Spotter(Game game, Entity attacker, Targetable target,
+          @Nullable List<ECMInfo> allECMInfo) {
+        if (!attackerCanUseC3(attacker, game)) {
+            return attacker;
+        }
+
+        List<SpotterInfo> spotters = collectSpotters(game, attacker, target);
+
+        if (!spotters.isEmpty()) {
+            // ensure network connectivity
+            List<ECMInfo> ecmInfo = (allECMInfo != null) ? allECMInfo
+                  : ComputeECM.computeAllEntitiesECMInfo(game.getEntitiesVector());
+            spotters.sort(Comparator.comparingInt(SpotterInfo::rangeToTarget));
+
+            // Do C3 spotters need LOS?
+            boolean spotterNeedsLOS = Game.rulesManager.getRulesC3().c3SpotterLOSRequired();
+
+            // Memoizes canCompleteNodePath results for the duration of this lookup. Uncached, the recursive search
+            // explores every increasing-index path through the network - exponential in a dense, ECM-heavy network,
+            // which made this search the dominant cost in C3 to-hit evaluation. Caching each (start, startPosition)
+            // subproblem makes it polynomial.
+            Map<Long, Boolean> pathCache = new HashMap<>();
+
+            int position = 0;
+            for (SpotterInfo spotterInfo : spotters) {
+                Entity spotter = spotterInfo.spotter;
+                for (int count = position++; count < spotters.size(); count++) {
+                    if (canCompleteNodePath(spotter, attacker, spotters, count, ecmInfo, pathCache)) {
+
+                        if (spotterNeedsLOS) {
+                            LosEffects c3LOS = LosEffects.calculateLOS(game, spotter, target);
+                            if (!c3LOS.isBlocked()) {
+                                return spotter;
+                            }
+                        } else {
+                            return spotter;
+                        }
+                    }
+                }
+            }
+        }
+
+        return attacker;
+    }
+
+    // Find C3 spotters, even if they are under ECM
+    static Entity findC3SpotterUnderECM(Game game, Entity attacker, Targetable target) {
+        return findC3SpotterUnderECM(game, attacker, target, null);
+    }
+
+    /**
+     * Same as {@link #findC3SpotterUnderECM(Game, Entity, Targetable)}, but accepts a precomputed list of ECM
+     * information for all game entities to avoid recomputing it on every call.
+     *
+     * @param attacker   The firing unit
+     * @param target     The target of the potential attack
+     * @param game       The game
+     * @param allECMInfo Precomputed ECM information for all game entities, as returned by
+     *                   {@link ComputeECM#computeAllEntitiesECMInfo(List)}, or {@code null} to compute it on demand
+     *
+     * @return A C3-type spotter or the attacker itself if no spotters are found
+     */
+    static Entity findC3SpotterUnderECM(Game game, Entity attacker, Targetable target,
+          @Nullable List<ECMInfo> allECMInfo) {
+        if (!attackerCanUseC3(attacker, game)) {
+            return attacker;
+        }
+
+        List<SpotterInfo> spotters = collectSpotters(game, attacker, target);
+
+        if (!spotters.isEmpty()) {
+            // ensure network connectivity
+            List<ECMInfo> ecmInfo = (allECMInfo != null) ? allECMInfo
+                  : ComputeECM.computeAllEntitiesECMInfo(game.getEntitiesVector());
+            spotters.sort(Comparator.comparingInt(SpotterInfo::rangeToTarget));
+
+            Map<Long, Boolean> pathCache = new HashMap<>();
+            int position = 0;
+            for (SpotterInfo spotterInfo : spotters) {
+                Entity spotter = spotterInfo.spotter;
+                LosEffects c3LOS = LosEffects.calculateLOS(game, spotter, target);
+                if (!c3LOS.isBlocked()) {
+                    spotter.setC3ecmAffected(!canCompleteNodePath(spotter, attacker, spotters, position, ecmInfo,
+                          pathCache));
+                    return spotter;
+                }
+                position++;
+            }
+        }
+
+        return attacker;
+    }
+
+    /**
+     * Collects all valid C3 spotters for the attacker, each with its effective distance to the target.
+     *
+     * @param attacker The firing unit
+     * @param target   The target of the potential attack
+     * @param game     The game
+     *
+     * @return The valid spotters for the attacker's network, unsorted; empty if there are none
+     */
+    private static List<SpotterInfo> collectSpotters(Game game, Entity attacker, Targetable target) {
+        List<SpotterInfo> spotters = new ArrayList<>();
+
+        for (Entity other : game.getEntitiesVector()) {
+            if (isValidC3Spotter(other, attacker, game)) {
+                int spotterRange = Compute.effectiveDistance(game, other, target, false);
+                spotters.add(new SpotterInfo(other, spotterRange));
+            }
+        }
+
+        return spotters;
+    }
+
+    /**
+     * Returns false if the attacker does not have a functional C3 system or is prevented from using it at this time,
+     * true otherwise. When this returns true, a spotter should be searched, otherwise this can be omitted.
+     *
+     * @param attacker The attacking unit
+     *
+     * @return False if the attacker cannot make use of C3 at this time
+     */
+    private static boolean attackerCanUseC3(Entity attacker, Game game) {
+        if (attacker.isOffBoard() || attacker.isShutDown()
+              || (!attacker.hasC3()
+              && !attacker.hasC3i()
+              && !attacker.hasActiveNovaCEWS()
+              && !attacker.hasNavalC3())
+              || EquipmentActivation.isC3SwitchedOff(attacker)) {
+            return false;
+        }
+
+        if (attacker.isStealthActive()) {
+            return false;
+        }
+
+        if (attacker.isLargeCraft() && !attacker.isSpaceborne()) {
+            // Assuming that Naval C3 only works in space as it is "optimized for the speeds and distances of space
+            // weapons"; TO:AUE p.144
+            return false;
+        }
+
+        // Assuming that C3, C3i systems only work on ground maps, TW p.131. Nova can be mounted on some aeros
+        // but only works when "interacting with ground units", IO:AE p.60
+        return attacker.isLargeCraft() || game.isOnGroundMap(attacker);
+    }
+
+    /**
+     * Returns true if the given other unit is a valid C3 spotter for the attacker, i.e. if it is connected to the
+     * attacker's C3, deployed and on the same board and not otherwise prevented from acting as a C3 spotter.
+     *
+     * @param other    The unit to test (all units are allowed to be passed in)
+     * @param attacker The attacking unit
+     *
+     * @return True if the other is a valid C3 spotter and may be used for range calculation
+     */
+    private static boolean isValidC3Spotter(Entity other, Entity attacker, Game game) {
+        return !attacker.equals(other)
+              && other.isDeployed()
+              && !other.isStealthActive()
+              && !other.isShutDown()
+              && !EquipmentActivation.isC3SwitchedOff(other)
+              && !other.isOffBoard()
+              && !other.isTransported()
+              && game.hasBoardLocationOf(other)
+              && attacker.onSameC3NetworkAs(other, true)
+              && game.onTheSameBoard(attacker, other);
+    }
+
+    /**
+     * Looks through the network list to ensure that there's no ECM blocking the path from spotter to attacker.
+     *
+     * @param start         The unit to start the network path on
+     * @param end           The unit to end the network path on
+     * @param network       The network of possibly connected units
+     * @param startPosition The spotter's index in the network list
+     * @param allECMInfo    Precomputed ECM information for all game entities
+     * @param pathCache     Memoization cache of {@code (start, startPosition)} results, scoped to one
+     *                      {@code findC3Spotter} lookup
+     *
+     * @return {@code true} when the given Entity is connected to the network
+     */
+    private static boolean canCompleteNodePath(Entity start, Entity end, List<SpotterInfo> network, int startPosition,
+          List<ECMInfo> allECMInfo, Map<Long, Boolean> pathCache) {
+        // Within a single findC3Spotter lookup the network, end unit and ECM data are fixed, so the result depends
+        // only on (start, startPosition). Memoizing that avoids the exponential re-exploration of increasing-index
+        // paths that made this search dominate C3 to-hit cost in dense, ECM-heavy networks.
+        long cacheKey = ((long) start.getId() << 32) | (startPosition & 0xFFFFFFFFL);
+        Boolean cached = pathCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+        boolean result = resolveNodePath(start, end, network, startPosition, allECMInfo, pathCache);
+        pathCache.put(cacheKey, result);
+        return result;
+    }
+
+    private static boolean resolveNodePath(Entity start, Entity end, List<SpotterInfo> network, int startPosition,
+          List<ECMInfo> allECMInfo, Map<Long, Boolean> pathCache) {
+        Entity spotter = network.get(startPosition).spotter;
+
+        // ECMInfo for line between spotter's position and start's position
+        ECMInfo spotterStartECM = ComputeECM.getECMEffects(spotter, start.getPosition(), spotter.getPosition(),
+              true, allECMInfo);
+
+        // Check for ECM between spotter and start
+        boolean isC3BDefeated = start.hasBoostedC3() && (spotterStartECM != null) && spotterStartECM.isAngelECM();
+        boolean isNovaDefeated = start.hasNovaCEWS() && (spotterStartECM != null) && spotterStartECM.isNovaECM();
+        boolean isC3Defeated = !(start.hasBoostedC3() || start.hasNovaCEWS())
+              && (spotterStartECM != null)
+              && spotterStartECM.isECM();
+        if (isC3BDefeated || isNovaDefeated || isC3Defeated) {
+            return false;
+        }
+
+        // ECMInfo for line between spotter's position and end's position
+        ECMInfo spotterEndECM = ComputeECM.getECMEffects(spotter, spotter.getPosition(), end.getPosition(),
+              true, allECMInfo);
+        isC3BDefeated = start.hasBoostedC3() && (spotterEndECM != null) && spotterEndECM.isAngelECM();
+        isNovaDefeated = start.hasNovaCEWS() && (spotterEndECM != null) && spotterEndECM.isNovaECM();
+        isC3Defeated = !(start.hasBoostedC3() || start.hasNovaCEWS())
+              && (spotterEndECM != null)
+              && spotterEndECM.isECM();
+        // If there's no ECM between spotter and end, we're done
+        if (!(isC3BDefeated || isNovaDefeated || isC3Defeated)) {
+            return true;
+        }
+
+        for (++startPosition; startPosition < network.size(); startPosition++) {
+            if (canCompleteNodePath(spotter, end, network, startPosition, allECMInfo, pathCache)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private record SpotterInfo(Entity spotter, int rangeToTarget) {}
+
+    private ComputeC3Spotter() {}
+}

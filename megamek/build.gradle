@@ -1,0 +1,182 @@
+// HeavyMek's build for the game itself.
+//
+// MegaMek's original build also produced suite releases with MegaMekLab and MekHQ, pulled its art from a
+// separate data repository, wrapped Windows .exe launchers, reported crashes to MegaMek's servers and ran
+// code-style checks. HeavyMek keeps the parts it needs: compile, test, run, and package a playable folder.
+//
+// Handy commands (run them from the repository root):
+//   ./gradlew run          start HeavyMek from the source tree
+//   ./gradlew test         run the unit tests
+//   ./gradlew installDist  build a playable folder in megamek/build/install/HeavyMek
+
+import java.time.LocalDateTime
+
+plugins {
+    id 'application'
+    id 'java'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+sourceSets {
+    main {
+        java {
+            srcDirs = ['src']
+        }
+        resources {
+            srcDirs = ['resources']
+        }
+    }
+    test {
+        java {
+            srcDirs = ['unittests']
+        }
+        resources {
+            srcDirs = ['testresources']
+        }
+    }
+}
+
+dependencies {
+    implementation 'com.fasterxml.jackson.core:jackson-core:2.21.7'
+    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.21.2'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.21.2'
+
+    implementation 'com.formdev:flatlaf:3.7.1'
+    implementation 'com.formdev:flatlaf-extras:3.7.1'
+
+    implementation 'com.sun.mail:jakarta.mail:2.0.2'
+
+    implementation 'com.thoughtworks.xstream:xstream:1.4.21'
+
+    implementation 'commons-io:commons-io:2.21.0'
+
+    implementation 'jakarta.xml.bind:jakarta.xml.bind-api:4.0.5'
+    implementation 'jakarta.annotation:jakarta.annotation-api:3.0.0'
+
+    implementation 'org.apache.commons:commons-collections4:4.5.0'
+    implementation 'org.apache.commons:commons-lang3:3.21.0'
+    implementation 'org.apache.commons:commons-text:1.15.0'
+
+    implementation 'org.apache.logging.log4j:log4j-api:2.25.5'
+    implementation 'org.apache.logging.log4j:log4j-core:2.25.5'
+
+    implementation 'org.apache.pdfbox:pdfbox:3.0.7'
+
+    implementation('org.apache.xmlgraphics:batik-bridge:1.19') {
+        // We don't need the python and javascript engine taking up space
+        exclude group: 'org.python', module: 'jython'
+        exclude group: 'org.mozilla', module: 'rhino'
+        // Exclude only the base xml-apis artifact (it duplicates JDK org.w3c.dom classes); keep xml-apis-ext,
+        // which provides org.w3c.dom.svg used by Batik's SVG DOM at runtime.
+        exclude group: 'xml-apis', module: 'xml-apis'
+    }
+
+    implementation 'org.freemarker:freemarker:2.3.35'
+
+    implementation 'org.commonmark:commonmark:0.28.0'
+
+    implementation 'com.squareup:gifencoder:0.10.1'
+
+    implementation 'com.ibm.icu:icu4j:78.3'
+
+    runtimeOnly 'org.glassfish.jaxb:jaxb-runtime:4.0.7'
+
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:6.0.3'
+    testRuntimeOnly('org.apache.xmlgraphics:batik-codec:1.19') {
+        exclude group: 'xml-apis', module: 'xml-apis'
+    }
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:6.0.3'
+    testImplementation 'org.mockito:mockito-core:5.23.0'
+    testImplementation 'org.apache.xmlgraphics:batik-svggen:1.19'
+}
+
+// Java options the game needs: enough memory, and the access that saving games (XStream) requires.
+def gameJvmOptions = [
+        '-Xmx4096m',
+        '--add-opens', 'java.base/java.util=ALL-UNNAMED',
+        '--add-opens', 'java.base/java.util.concurrent=ALL-UNNAMED',
+        '-Dsun.awt.disablegrab=true'
+]
+
+application {
+    applicationName = 'HeavyMek'
+    mainClass = 'megamek.MegaMek'
+    applicationDefaultJvmArgs = gameJvmOptions
+}
+
+jar {
+    archiveFileName = 'HeavyMek.jar'
+
+    manifest {
+        attributes 'Main-Class': application.mainClass
+        // The libraries sit next to HeavyMek.jar in the lib folder, so `java -jar lib/HeavyMek.jar` works too.
+        attributes 'Class-Path': sourceSets.main.runtimeClasspath.files
+                .findAll { it.name.endsWith('.jar') }.collect { it.name }.join(' ')
+        attributes 'Add-Opens': 'java.base/java.util java.base/java.util.concurrent'
+        attributes 'MegaMek-Launcher-Ready': '1'
+        attributes 'Build-Date': LocalDateTime.now()
+        attributes 'Sealed': true
+    }
+}
+
+// The game looks for data/, mmconf/ and docs/ in the folder it starts in: this folder when it runs from source,
+// the install folder when it's packaged.
+run {
+    workingDir = projectDir
+    jvmArgs = gameJvmOptions
+}
+
+distributions {
+    main {
+        distributionBaseName = 'HeavyMek'
+        contents {
+            from(projectDir) {
+                include 'data/**'
+                include 'docs/**'
+                include 'mmconf/**'
+                include 'userdata/README.md'
+                // Personal settings the game writes while you play; never package them.
+                exclude 'mmconf/clientsettings.xml'
+                exclude 'mmconf/*gameoptions.xml'
+                exclude 'mmconf/*.preferences'
+                exclude 'mmconf/*.properties.bak'
+                exclude 'mmconf/recent_boards.yml'
+                exclude 'mmconf/recent-advanced-searches.json'
+                exclude 'mmconf/searches/*.json'
+                exclude '**/*.cache'
+            }
+            from(rootDir) {
+                include 'README.md', 'LICENSE', 'LICENSE.assets', 'LICENSING.md', 'CONTRIBUTORS.md'
+            }
+            from("${projectDir}/scripts") {
+                include 'shell.sh'
+                rename 'shell.sh', 'HeavyMek.sh'
+                filePermissions {
+                    unix('rwxr-xr-x')
+                }
+            }
+        }
+    }
+}
+
+distTar {
+    archiveExtension = 'tar.gz'
+    compression = Compression.GZIP
+}
+
+test {
+    useJUnitPlatform {
+        excludeTags 'on-demand'
+    }
+    minHeapSize = '1024m'
+    maxHeapSize = '4096m'
+    // The same access as the game itself, so tests can exercise saved games.
+    jvmArgs '--add-opens', 'java.base/java.util=ALL-UNNAMED',
+            '--add-opens', 'java.base/java.util.concurrent=ALL-UNNAMED'
+}

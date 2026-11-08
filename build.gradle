@@ -1,0 +1,33 @@
+plugins {
+    id 'java'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+allprojects {
+    repositories {
+        mavenCentral()
+    }
+}
+
+// HeavyMek still reports MegaMek's version number (megamek/resources/Version.properties), because save files
+// and network games compare it. HeavyMek's own version can come later.
+subprojects {
+    Properties versionProperties = new Properties()
+    rootProject.file('megamek/resources/Version.properties').withInputStream { versionProperties.load(it) }
+    String gameVersion = String.format('%d.%02d.%02d',
+            Integer.parseInt(versionProperties.getProperty('major')),
+            Integer.parseInt(versionProperties.getProperty('minor')),
+            Integer.parseInt(versionProperties.getProperty('patch')))
+    String revision = versionProperties.getProperty('revision')?.trim()
+    if (revision && Integer.parseInt(revision) > 0) {
+        gameVersion += ".${revision}"
+    }
+
+    group = 'heavymek'
+    version = gameVersion
+}

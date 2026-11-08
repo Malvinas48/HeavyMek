@@ -1,0 +1,105 @@
+/*
+ * Copyright (c) 2005 - Ben Mazur (bmazur@sev.org)
+ * Copyright (C) 2008-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+
+package megamek.common.weapons.handlers;
+
+import java.io.Serial;
+import java.util.Vector;
+
+import megamek.common.Report;
+import megamek.common.ToHitData;
+import megamek.common.actions.WeaponAttackAction;
+import megamek.common.enums.ChargeLevel;
+import megamek.common.enums.GamePhase;
+import megamek.common.enums.HitDamageType;
+import megamek.common.equipment.Mounted;
+import megamek.common.game.Game;
+import megamek.common.loaders.EntityLoadingException;
+import megamek.server.totalWarfare.TWGameManager;
+
+public class BombastLaserWeaponHandler extends EnergyWeaponHandler {
+    @Serial
+    private static final long serialVersionUID = 2452514543790235562L;
+
+    /**
+     * Bombast Laser handler
+     *
+     * @param toHit       tohit calc
+     * @param waa         weapon attack action
+     * @param game        game
+     * @param gameManager TWGameManager
+     *
+     * @throws EntityLoadingException
+     */
+    public BombastLaserWeaponHandler(ToHitData toHit, WeaponAttackAction waa, Game game, TWGameManager gameManager)
+          throws EntityLoadingException {
+        super(toHit, waa, game, gameManager);
+        generalDamageType = HitDamageType.DAMAGE_ENERGY;
+    }
+
+    @Override
+    public boolean handle(GamePhase phase, Vector<Report> returnedReports) {
+        boolean handled = false;
+        handled = super.handle(phase, returnedReports);
+        dischargeIfCharged();
+
+        return handled;
+    }
+
+    private void dischargeIfCharged() {
+        if (weapon.getChargeState() != ChargeLevel.CHARGED) {
+            return;
+        }
+        weapon.setChargeState(ChargeLevel.CHARGE_NONE);
+    }
+
+    public static int getDamageValue(Mounted<?> weapon) {
+        int damageValue = 16;
+        String damage = weapon.curMode().getName().toLowerCase();
+        if ((damage.trim().length() > 6) && damage.contains("damage")) {
+            return damageValue = Integer.parseInt(damage.substring(damage.indexOf("damage") + 6).trim());
+        }
+        return damageValue;
+    }
+
+    public static int getHeat(Mounted<?> mounted) {
+        int damage = getDamageValue(mounted);
+        return switch (damage) {
+            case 16 -> 12;
+            case 12 -> 8;
+            case 8 -> 6;
+            default -> 12;
+        };
+    }
+}

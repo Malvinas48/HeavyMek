@@ -1,0 +1,1817 @@
+/*
+ * Copyright (C) 2002-2004 Josh Yockey
+ * Copyright (C) 2002-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+package megamek.common.loaders;
+
+import java.awt.Image;
+import java.io.File;
+import java.io.Serial;
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.Vector;
+import java.util.stream.Collectors;
+
+import jakarta.annotation.Nullable;
+import megamek.client.ui.Base64Image;
+import megamek.codeUtilities.StringUtility;
+import megamek.common.SourceBookCode;
+import megamek.common.TechConstants;
+import megamek.common.alphaStrike.ASArcSummary;
+import megamek.common.alphaStrike.ASCardDisplayable;
+import megamek.common.alphaStrike.ASDamageVector;
+import megamek.common.alphaStrike.ASSpecialAbilityCollection;
+import megamek.common.alphaStrike.ASSpecialAbilityCollector;
+import megamek.common.alphaStrike.ASUnitType;
+import megamek.common.alphaStrike.AlphaStrikeHelper;
+import megamek.common.alphaStrike.BattleForceSUA;
+import megamek.common.battlefieldSupport.BFSAssetType;
+import megamek.common.battlefieldSupport.BFSDamage;
+import megamek.common.battlefieldSupport.BFSRange;
+import megamek.common.battlefieldSupport.BFSSpecial;
+import megamek.common.battlefieldSupport.BFSSpecialType;
+import megamek.common.enums.TechRating;
+import megamek.common.equipment.Mounted;
+import megamek.common.options.IOption;
+import megamek.common.options.IOptionInfo;
+import megamek.common.options.Quirks;
+import megamek.common.units.Entity;
+import megamek.common.units.EntityMovementMode;
+import megamek.common.units.ForceGeneratorAvailability;
+import megamek.common.units.UnitRole;
+import megamek.common.util.UnitRulesRefUtil;
+import megamek.logging.MMLogger;
+
+/**
+ * The MekSummary of a unit offers compiled information about the unit without having to load the file.
+ */
+public class MekSummary implements Serializable, ASCardDisplayable {
+    /**
+     * This class had no explicit serialVersionUID, so the JVM computed one from the field list. That meant every change
+     * to the fields silently invalidated units.cache, and this release changes them again, so one more rebuild happens
+     * on first run. {@code MekSummaryCache} catches the failure and rescans, so it heals itself.
+     * <p>
+     * Pinning it stops the next field addition from doing the same. Bump it only for a change that genuinely cannot be
+     * read back, and expect a full cache rebuild when you do.
+     * </p>
+     * <p>
+     * Bumped to 3 for the tech rating: an older cache reads back with it missing, and nothing would rescan those
+     * units to fill it in.
+     * </p>
+     */
+    @Serial
+    private static final long serialVersionUID = 3L;
+
+    private static final MMLogger logger = MMLogger.create(MekSummary.class);
+    private String name;
+    private String chassis;
+    private String clanChassisName;
+    private String model;
+    /** The unit's own unit-file UUID (from its {@code .blk}/{@code .mtf}/{@code .bfs} file), or {@code null}. */
+    private String unitFileUUID;
+    /** For a Battlefield Support Asset, the base unit's UUID it links to, or {@code null} when standalone. */
+    private String linkedUnitId;
+    private int mulId;
+    private String unitType;
+    private String unitSubType;
+    private String fullAccurateUnitType;
+    private Long entityType;
+    private Base64Image fluffImage = new Base64Image();
+    private boolean omni;
+    private boolean military;
+    private boolean mountedInfantry;
+    private int tankTurrets;
+    private File sourceFile;
+    private String source;
+    private String published;
+    private boolean nonCanonBySource;
+    private boolean invalid;
+    private String techLevel;
+    private int techLevelCode;
+    private TechRating techRating;
+    private String techBase;
+    private boolean failedToLoadEquipment;
+    private String entryName; // for files in zips
+    private int year;
+    private int type;
+    private int[] altTypes = new int[] { TechConstants.T_IS_TW_NON_BOX, TechConstants.T_IS_ADVANCED,
+                                         TechConstants.T_IS_EXPERIMENTAL }; // tech level constant at standard, advanced, and experimental rules
+    // levels
+    private double tons;
+    private int weightClass;
+    private int bv;
+    private int genericBattleValue;
+
+    /**
+     * For Battlefield Support Assets: the Veteran cost expressed in Battle Value (Veteran BSP times 20), or 0 if the
+     * asset has no Veteran variant. Non-asset units leave this at 0.
+     */
+    private int bfsVeteranBv;
+
+    // === Battlefield Support Asset stats, cached for Advanced Search filtering. ===
+    // These are populated only for .bfs Assets (isBattlefieldSupportAsset()); non-assets leave them at their defaults.
+    /** The Asset's rules category, or {@code null} for a non-asset. */
+    private BFSAssetType bfsAssetType;
+    /** The Asset card title (chassis if not overridden), for the basic name filter. */
+    private String bfsCardTitle;
+    /** The Asset card subtitle (model if not overridden), for the basic name filter. */
+    private String bfsCardSubtitle;
+    /** The Asset's movement mode, or {@code null} for a non-asset. */
+    private EntityMovementMode bfsMovementMode;
+    /** The Asset's single Movement Point allowance for its declared mode. */
+    private int bfsMp;
+    /** The Asset's fixed Target Movement Modifier. */
+    private int bfsTmm;
+    /** The Asset's Short/Medium/Long range, or {@code null} for a non-asset. */
+    private BFSRange bfsRange;
+    /** The Asset's keyword-range label (for example {@code Artillery}), or {@code null} for a numeric/absent range. */
+    private String bfsRangeKeyword;
+    /** The Asset's crew Skill (to-hit base target number). */
+    private int bfsSkill;
+    /** The Asset's attack damage, or {@code null} for a non-asset. */
+    private BFSDamage bfsDamage;
+    /** The Asset's undamaged (original) Destroy Check target number. */
+    private int bfsDestroyCheck;
+    /** The Asset's damage Threshold. */
+    private int bfsThreshold;
+    /** The Asset's effective Battlefield Support Point cost. */
+    private int bfsBsp;
+    /** The recognized Specials present on the Asset, for presence filtering. */
+    private List<BFSSpecialType> bfsSpecials = new ArrayList<>();
+    /**
+     * The full Specials present on the Asset, retaining parameter values (for example {@code ECM4},
+     * {@code Artillery (LT)}), for value-based filtering.
+     */
+    private List<BFSSpecial> bfsSpecialDetails = new ArrayList<>();
+
+    /** The full cost of the unit (including ammo). */
+    private long cost;
+
+    /** The dry cost of the unit (excluding ammo). */
+    private long dryCost;
+    private long altCost;
+    private long modified; // for comparison when loading
+    private String level;
+    private int advTechYear; // year after which the unit is advanced level
+    private int stdTechYear; // year after which the unit is standard level
+    private int prototypeDate;
+    private int productionDate;
+    private int commonDate;
+    private int techExtinctionDate;
+    private int reintroductionDate;
+    private String extinctRange;
+    private boolean canon;
+    private boolean patchwork;
+    private boolean frankenMek;
+    private boolean doomedOnGround;
+    private boolean doomedInAtmosphere;
+    private boolean doomedInSpace;
+    private boolean doomedInExtremeTemp;
+    private boolean doomedInVacuum;
+    private boolean clan;
+    private boolean mixedTech;
+    private boolean support;
+    private int walkMp;
+    private int runMp;
+    private int jumpMp;
+    private EntityMovementMode moveMode;
+    private int totalArmor;
+    private int totalInternal;
+    private int cockpitType;
+    private String engineName;
+    private int engineType;
+    private int gyroType;
+    private String myomerName;
+    private int lowerArms;
+    private int hands;
+    private double troopCarryingSpace;
+    private int aSFBays;
+    private int aSFDoors;
+    private double aSFUnits;
+    private int smallCraftBays;
+    private int smallCraftDoors;
+    private double smallCraftUnits;
+    private int dockingCollars;
+    private int mekBays;
+    private int mekDoors;
+    private double mekUnits;
+    private int heavyVehicleBays;
+    private int heavyVehicleDoors;
+    private double heavyVehicleUnits;
+    private int lightVehicleBays;
+    private int lightVehicleDoors;
+    private double lightVehicleUnits;
+    private int protoMekBays;
+    private int protoMekDoors;
+    private double protoMekUnits;
+    private int battleArmorBays;
+    private int battleArmorDoors;
+    private double battleArmorUnits;
+    private int infantryBays;
+    private int infantryDoors;
+    private double infantryUnits;
+    private int superHeavyVehicleBays;
+    private int superHeavyVehicleDoors;
+    private double superHeavyVehicleUnits;
+    private int dropShuttleBays;
+    private int dropShuttleDoors;
+    private double dropShuttleUnits;
+    private int battleArmorHandles;
+    private double cargoBayUnits;
+    private int navalRepairFacilities;
+
+    /** For BattleArmor, we want to know the weight of an individual suit. */
+    private double twSuitTons;
+    private double toSuitTons;
+    private double suitWeight;
+
+    /** The type of internal structure on this unit **/
+    private int internalsType;
+
+    /**
+     * Each location can have a separate armor type, but this is used for search purposes. We really only care about
+     * which types are present.
+     */
+    private final HashSet<Integer> armorTypeSet;
+
+    /** The armor type for each location. */
+    private int[] armorLoc;
+
+    /** The armor tech type for each location. */
+    private int[] armorLocTech;
+
+    /** A unique list of the names of the equipment mounted on this unit. */
+    private Vector<String> equipmentNames;
+
+    /**
+     * The number of times the piece of equipment in the corresponding equipmentNames list appears.
+     */
+    private Vector<Integer> equipmentQuantities;
+
+    /** Alternative sourcebook combinations that each cover every referenced component on this unit. */
+    private List<List<SourceBookCode>> rulesRefs = List.of();
+
+    private String quirkNames;
+    private String weaponQuirkNames;
+
+    // AlphaStrike values
+    private int pointValue = 0;
+    private ASUnitType asUnitType = ASUnitType.UNKNOWN;
+    private int size = 0;
+    private int tmm = 0;
+    private Map<String, Integer> movement = new LinkedHashMap<>();
+    private String primaryMovementMode = "";
+    private ASDamageVector standardDamage = ASDamageVector.ZERO;
+    private int overheat = 0;
+    private ASArcSummary frontArc = new ASArcSummary();
+    private ASArcSummary leftArc = new ASArcSummary();
+    private ASArcSummary rightArc = new ASArcSummary();
+    private ASArcSummary rearArc = new ASArcSummary();
+    private int threshold;
+    private int fullArmor;
+    private int fullStructure;
+    private int squadSize;
+    private ASSpecialAbilityCollection specialAbilities = new ASSpecialAbilityCollection();
+    private UnitRole role = UnitRole.UNDETERMINED;
+
+    /** Force Generator availability declared in the unit file. Empty for canon units, which use data/forcegenerator. */
+    private List<ForceGeneratorAvailability> forceGeneratorAvailability = new ArrayList<>();
+
+    /** Force Generator mission roles declared in the unit file, as raw comma-separated text. */
+    private String missionRoles = "";
+
+    public MekSummary() {
+        armorTypeSet = new HashSet<>();
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    @Override
+    public String getChassis() {
+        return chassis;
+    }
+
+    @Override
+    public String getFullChassis() {
+        return chassis + (StringUtility.isNullOrBlank(clanChassisName) ? "" : " (" + clanChassisName + ")");
+    }
+
+    public void setClanChassisName(String name) {
+        clanChassisName = name;
+    }
+
+    public String getClanChassisName() {
+        return clanChassisName;
+    }
+
+    @Override
+    public String getModel() {
+        return model;
+    }
+
+    @Override
+    public int getMulId() {
+        return mulId;
+    }
+
+    public String getUnitType() {
+        return unitType;
+    }
+
+    public boolean isCanon() {
+        return canon;
+    }
+
+    public boolean isPatchwork() {
+        return patchwork;
+    }
+
+    public boolean isFrankenMek() {
+        return frankenMek;
+    }
+
+    public boolean isDoomedOnGround() {
+        return doomedOnGround;
+    }
+
+    public boolean isDoomedInAtmosphere() {
+        return doomedInAtmosphere;
+    }
+
+    public boolean isDoomedInSpace() {
+        return doomedInSpace;
+    }
+
+    public boolean isDoomedInExtremeTemp() {
+        return doomedInExtremeTemp;
+    }
+
+    public boolean isDoomedInVacuum() {
+        return doomedInVacuum;
+    }
+
+    public boolean isClan() {
+        return clan;
+    }
+
+    public boolean isSupport() {
+        return support;
+    }
+
+    /** @return true if this summary represents a Battlefield Support Asset (a {@code .bfs} unit). */
+    @Override
+    public boolean isBattlefieldSupportAsset() {
+        return (entityType != null) && ((entityType & Entity.ETYPE_BATTLEFIELD_SUPPORT_ASSET) != 0);
+    }
+
+    /** @return this unit's own unit-file UUID, or {@code null} if the file carries none */
+    public @Nullable String getUnitFileUUID() {
+        return unitFileUUID;
+    }
+
+    public void setUnitFileUUID(@Nullable String unitFileUUID) {
+        this.unitFileUUID = unitFileUUID;
+    }
+
+    /** @return for a Battlefield Support Asset, the base unit's UUID it links to; {@code null} when standalone/non-asset */
+    public @Nullable String getLinkedUnitId() {
+        return linkedUnitId;
+    }
+
+    public void setLinkedUnitId(@Nullable String linkedUnitId) {
+        this.linkedUnitId = linkedUnitId;
+    }
+
+    public String getUnitSubType() {
+        return unitSubType;
+    }
+
+    public File getSourceFile() {
+        return sourceFile;
+    }
+
+    public boolean getInvalid() {
+        return invalid;
+    }
+
+    public String getTechLevel() {
+        return techLevel;
+    }
+
+    public int getTechLevelCode() {
+        return techLevelCode;
+    }
+
+    /**
+     * @return the unit's overall tech rating, or {@code null} if the summary was built without one
+     */
+    public @Nullable TechRating getTechRating() {
+        return techRating;
+    }
+
+    public String getTechBase() {
+        return techBase;
+    }
+
+    public boolean getFailedToLoadEquipment() {
+        return failedToLoadEquipment;
+    }
+
+    public String getSource() {
+        return (source != null) ? source : "";
+    }
+
+    public String getPublished() {
+        return (published != null) ? published : "";
+    }
+
+    public boolean hasPublishedRecordSheet() {
+        return !getPublished().isBlank();
+    }
+
+    public boolean isNonCanonBySource() {
+        return nonCanonBySource;
+    }
+
+    public String getEntryName() {
+        return entryName;
+    }
+
+    public int getYear() {
+        return year;
+    }
+
+    public int getType() {
+        return type;
+    }
+
+    public int getType(int year) {
+        if (year >= stdTechYear) {
+            return altTypes[0];
+        } else if (year >= advTechYear) {
+            return altTypes[1];
+        } else {
+            return altTypes[2];
+        }
+    }
+
+    public String getFullAccurateUnitType() {
+        return fullAccurateUnitType;
+    }
+
+    public long getEntityType() {
+        return entityType;
+    }
+
+    public boolean getOmni() {
+        return omni;
+    }
+
+    public boolean getMilitary() {
+        return military;
+    }
+
+    public boolean getMountedInfantry() {
+        return mountedInfantry;
+    }
+
+    public int getTankTurrets() {
+        return tankTurrets;
+    }
+
+    public int getLowerArms() {
+        return lowerArms;
+    }
+
+    public int getHands() {
+        return hands;
+    }
+
+    public double getTroopCarryingSpace() {
+        return troopCarryingSpace;
+    }
+
+    public int getASFBays() {
+        return aSFBays;
+    }
+
+    public int getASFDoors() {
+        return aSFDoors;
+    }
+
+    public double getASFUnits() {
+        return aSFUnits;
+    }
+
+    public int getSmallCraftBays() {
+        return smallCraftBays;
+    }
+
+    public int getSmallCraftDoors() {
+        return smallCraftDoors;
+    }
+
+    public double getSmallCraftUnits() {
+        return smallCraftUnits;
+    }
+
+    public int getDockingCollars() {
+        return dockingCollars;
+    }
+
+    public int getMekBays() {
+        return mekBays;
+    }
+
+    public int getMekDoors() {
+        return mekDoors;
+    }
+
+    public double getMekUnits() {
+        return mekUnits;
+    }
+
+    public int getHeavyVehicleBays() {
+        return heavyVehicleBays;
+    }
+
+    public int getHeavyVehicleDoors() {
+        return heavyVehicleDoors;
+    }
+
+    public double getHeavyVehicleUnits() {
+        return heavyVehicleUnits;
+    }
+
+    public int getLightVehicleBays() {
+        return lightVehicleBays;
+    }
+
+    public int getLightVehicleDoors() {
+        return lightVehicleDoors;
+    }
+
+    public double getLightVehicleUnits() {
+        return lightVehicleUnits;
+    }
+
+    public int getProtoMekBays() {
+        return protoMekBays;
+    }
+
+    public int getProtoMekDoors() {
+        return protoMekDoors;
+    }
+
+    public double getProtoMekUnits() {
+        return protoMekUnits;
+    }
+
+    public int getBattleArmorBays() {
+        return battleArmorBays;
+    }
+
+    public int getBattleArmorDoors() {
+        return battleArmorDoors;
+    }
+
+    public double getBattleArmorUnits() {
+        return battleArmorUnits;
+    }
+
+    public int getInfantryBays() {
+        return infantryBays;
+    }
+
+    public int getInfantryDoors() {
+        return infantryDoors;
+    }
+
+    public double getInfantryUnits() {
+        return infantryUnits;
+    }
+
+    public int getSuperHeavyVehicleBays() {
+        return superHeavyVehicleBays;
+    }
+
+    public int getSuperHeavyVehicleDoors() {
+        return superHeavyVehicleDoors;
+    }
+
+    public double getSuperHeavyVehicleUnits() {
+        return superHeavyVehicleUnits;
+    }
+
+    public int getDropShuttleBays() {
+        return dropShuttleBays;
+    }
+
+    public int getDropShuttleDoors() {
+        return dropShuttleDoors;
+    }
+
+    public double getDropShuttleUnits() {
+        return dropShuttleUnits;
+    }
+
+    public int getBattleArmorHandles() {
+        return battleArmorHandles;
+    }
+
+    public double getCargoBayUnits() {
+        return cargoBayUnits;
+    }
+
+    public int getNavalRepairFacilities() {
+        return navalRepairFacilities;
+    }
+
+    public double getTons() {
+        return tons;
+    }
+
+    public double getTOWeight() {
+        return toSuitTons;
+    }
+
+    public double getTWWeight() {
+        return twSuitTons;
+    }
+
+    public int getBV() {
+        return bv;
+    }
+
+    /**
+     * @return for a Battlefield Support Asset, the Veteran cost in Battle Value (Veteran BSP times 20), or 0 if the
+     *       asset has no Veteran variant (or is not an asset)
+     */
+    public int getBfsVeteranBv() {
+        return bfsVeteranBv;
+    }
+
+    public void setBfsVeteranBv(int bfsVeteranBv) {
+        this.bfsVeteranBv = bfsVeteranBv;
+    }
+
+    /** @return the Asset's rules category, or {@code null} if this summary is not a Battlefield Support Asset */
+    public @Nullable BFSAssetType getBfsAssetType() {
+        return bfsAssetType;
+    }
+
+    public void setBfsAssetType(@Nullable BFSAssetType bfsAssetType) {
+        this.bfsAssetType = bfsAssetType;
+    }
+
+    /** @return the Asset card title, or {@code null} for a non-asset */
+    public @Nullable String getBfsCardTitle() {
+        return bfsCardTitle;
+    }
+
+    public void setBfsCardTitle(@Nullable String bfsCardTitle) {
+        this.bfsCardTitle = bfsCardTitle;
+    }
+
+    /** @return the Asset card subtitle, or {@code null} for a non-asset */
+    public @Nullable String getBfsCardSubtitle() {
+        return bfsCardSubtitle;
+    }
+
+    public void setBfsCardSubtitle(@Nullable String bfsCardSubtitle) {
+        this.bfsCardSubtitle = bfsCardSubtitle;
+    }
+
+    /** @return the Asset's movement mode, or {@code null} for a non-asset */
+    public @Nullable EntityMovementMode getBfsMovementMode() {
+        return bfsMovementMode;
+    }
+
+    public void setBfsMovementMode(@Nullable EntityMovementMode bfsMovementMode) {
+        this.bfsMovementMode = bfsMovementMode;
+    }
+
+    /** @return the Asset's single Movement Point allowance */
+    public int getBfsMp() {
+        return bfsMp;
+    }
+
+    public void setBfsMp(int bfsMp) {
+        this.bfsMp = bfsMp;
+    }
+
+    /** @return the Asset's fixed Target Movement Modifier */
+    public int getBfsTmm() {
+        return bfsTmm;
+    }
+
+    public void setBfsTmm(int bfsTmm) {
+        this.bfsTmm = bfsTmm;
+    }
+
+    /** @return the Asset's Short/Medium/Long range, or {@code null} for a non-asset */
+    public @Nullable BFSRange getBfsRange() {
+        return bfsRange;
+    }
+
+    public void setBfsRange(@Nullable BFSRange bfsRange) {
+        this.bfsRange = bfsRange;
+    }
+
+    /** @return the Asset's keyword-range label, or {@code null} for a numeric/absent range */
+    public @Nullable String getBfsRangeKeyword() {
+        return bfsRangeKeyword;
+    }
+
+    public void setBfsRangeKeyword(@Nullable String bfsRangeKeyword) {
+        this.bfsRangeKeyword = bfsRangeKeyword;
+    }
+
+    /** @return the Asset's crew Skill */
+    public int getBfsSkill() {
+        return bfsSkill;
+    }
+
+    public void setBfsSkill(int bfsSkill) {
+        this.bfsSkill = bfsSkill;
+    }
+
+    /** @return the Asset's attack damage, or {@code null} for a non-asset */
+    public @Nullable BFSDamage getBfsDamage() {
+        return bfsDamage;
+    }
+
+    public void setBfsDamage(@Nullable BFSDamage bfsDamage) {
+        this.bfsDamage = bfsDamage;
+    }
+
+    /** @return the Asset's undamaged Destroy Check target number */
+    public int getBfsDestroyCheck() {
+        return bfsDestroyCheck;
+    }
+
+    public void setBfsDestroyCheck(int bfsDestroyCheck) {
+        this.bfsDestroyCheck = bfsDestroyCheck;
+    }
+
+    /** @return the Asset's damage Threshold */
+    public int getBfsThreshold() {
+        return bfsThreshold;
+    }
+
+    public void setBfsThreshold(int bfsThreshold) {
+        this.bfsThreshold = bfsThreshold;
+    }
+
+    /** @return the Asset's effective Battlefield Support Point cost */
+    public int getBfsBsp() {
+        return bfsBsp;
+    }
+
+    public void setBfsBsp(int bfsBsp) {
+        this.bfsBsp = bfsBsp;
+    }
+
+    /** @return the recognized Specials present on the Asset (never {@code null}) */
+    public List<BFSSpecialType> getBfsSpecials() {
+        return (bfsSpecials != null) ? bfsSpecials : new ArrayList<>();
+    }
+
+    public void setBfsSpecials(List<BFSSpecialType> bfsSpecials) {
+        this.bfsSpecials = (bfsSpecials != null) ? bfsSpecials : new ArrayList<>();
+    }
+
+    /** @return the full Specials present on the Asset, retaining parameter values (never {@code null}) */
+    public List<BFSSpecial> getBfsSpecialDetails() {
+        return (bfsSpecialDetails != null) ? bfsSpecialDetails : new ArrayList<>();
+    }
+
+    public void setBfsSpecialDetails(List<BFSSpecial> bfsSpecialDetails) {
+        this.bfsSpecialDetails = (bfsSpecialDetails != null) ? bfsSpecialDetails : new ArrayList<>();
+    }
+
+    public int getGenericBattleValue() {
+        return genericBattleValue;
+    }
+
+    public long getCost() {
+        return cost;
+    }
+
+    public long getDryCost() {
+        return dryCost;
+    }
+
+    public long getAlternateCost() {
+        return altCost;
+    }
+
+    public long getModified() {
+        return modified;
+    }
+
+    public String getLevel() {
+        return level;
+    }
+
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public int getAdvancedTechYear() {
+        return advTechYear;
+    }
+
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public int getStandardTechYear() {
+        return stdTechYear;
+    }
+
+    public int getPrototypeDate() {
+        return prototypeDate;
+    }
+
+    public void setPrototypeDate(int prototypeDate) {
+        this.prototypeDate = prototypeDate;
+    }
+
+    public int getProductionDate() {
+        return productionDate;
+    }
+
+    public void setProductionDate(int productionDate) {
+        this.productionDate = productionDate;
+    }
+
+    public int getCommonDate() {
+        return commonDate;
+    }
+
+    public void setCommonDate(int commonDate) {
+        this.commonDate = commonDate;
+    }
+
+    public int getExtinctionDate() {
+        return techExtinctionDate;
+    }
+
+    public void setExtinctionDate(int extinctionDate) {
+        this.techExtinctionDate = extinctionDate;
+    }
+
+    /**
+     * @return the year this unit returned to production after going extinct, or {@code ITechnology.DATE_NONE} if it
+     *       never went extinct or never returned. A cache written before this field existed deserializes it as 0;
+     *       callers should treat any non-positive value as "no date".
+     */
+    public int getReintroductionDate() {
+        return reintroductionDate;
+    }
+
+    public void setReintroductionDate(int reintroductionDate) {
+        this.reintroductionDate = reintroductionDate;
+    }
+
+    public String getLevel(int year) {
+        if (level.equals("F")) {
+            return level;
+        }
+        if (year >= stdTechYear) {
+            if (type == TechConstants.T_INTRO_BOX_SET) {
+                return level;
+            } else {
+                return String.valueOf(TechConstants.T_SIMPLE_STANDARD + 1);
+            }
+        } else if (year >= advTechYear) {
+            return String.valueOf(TechConstants.T_SIMPLE_ADVANCED + 1);
+        } else {
+            return String.valueOf(TechConstants.T_SIMPLE_EXPERIMENTAL + 1);
+        }
+    }
+
+    @Override
+    public int getPointValue() {
+        return pointValue;
+    }
+
+    @Override
+    public ASUnitType getASUnitType() {
+        return asUnitType;
+    }
+
+    @Override
+    public int getSize() {
+        return size;
+    }
+
+    @Override
+    public int getTMM() {
+        return tmm;
+    }
+
+    @Override
+    public Map<String, Integer> getMovement() {
+        return movement;
+    }
+
+    @Override
+    public String getPrimaryMovementMode() {
+        return primaryMovementMode;
+    }
+
+    @Override
+    public ASDamageVector getStandardDamage() {
+        return standardDamage;
+    }
+
+    @Override
+    public int getOV() {
+        return overheat;
+    }
+
+    @Override
+    public ASArcSummary getFrontArc() {
+        return frontArc;
+    }
+
+    @Override
+    public ASArcSummary getLeftArc() {
+        return leftArc;
+    }
+
+    @Override
+    public ASArcSummary getRightArc() {
+        return rightArc;
+    }
+
+    @Override
+    public ASArcSummary getRearArc() {
+        return rearArc;
+    }
+
+    @Override
+    public int getThreshold() {
+        return threshold;
+    }
+
+    @Override
+    public int getFullArmor() {
+        return fullArmor;
+    }
+
+    @Override
+    public int getFullStructure() {
+        return fullStructure;
+    }
+
+    @Override
+    public int getSquadSize() {
+        return squadSize;
+    }
+
+    @Override
+    public ASSpecialAbilityCollection getSpecialAbilities() {
+        return specialAbilities;
+    }
+
+    @Override
+    public UnitRole getRole() {
+        return (role == null) ? UnitRole.UNDETERMINED : role;
+    }
+
+    /**
+     * Returns the Force Generator availability declared in this unit's file. Empty for canon units, whose availability
+     * comes from the era files in data/forcegenerator instead.
+     *
+     * @return the availability entries, never {@code null}
+     */
+    public List<ForceGeneratorAvailability> getForceGeneratorAvailability() {
+        // Empty rather than a fresh ArrayList: the Force Generator calls this for every unit in every era, so
+        // allocating here would churn. Null only happens for a summary read from a units.cache written before this
+        // field existed. Use the setter to change the entries; the returned list is not for mutating.
+        return (forceGeneratorAvailability == null) ? List.of() : forceGeneratorAvailability;
+    }
+
+    public void setForceGeneratorAvailability(List<ForceGeneratorAvailability> forceGeneratorAvailability) {
+        this.forceGeneratorAvailability = (forceGeneratorAvailability == null)
+              ? new ArrayList<>()
+              : new ArrayList<>(forceGeneratorAvailability);
+    }
+
+    /**
+     * Returns the Force Generator mission roles declared in this unit's file, as raw comma-separated text such as
+     * "fire_support,urban".
+     *
+     * @return the mission role text, never {@code null}
+     */
+    public String getMissionRoles() {
+        return (missionRoles == null) ? "" : missionRoles;
+    }
+
+    public void setMissionRoles(String missionRoles) {
+        this.missionRoles = (missionRoles == null) ? "" : missionRoles;
+    }
+
+    public void setFullAccurateUnitType(String type) {
+        fullAccurateUnitType = type;
+    }
+
+    public void setEntityType(long type) {
+        entityType = type;
+    }
+
+    public void setOmni(boolean b) {
+        omni = b;
+    }
+
+    public void setMilitary(boolean b) {
+        military = b;
+    }
+
+    public void setMountedInfantry(boolean b) {
+        mountedInfantry = b;
+    }
+
+    public void setTankTurrets(int i) {
+        tankTurrets = i;
+    }
+
+    public void setLowerArms(int i) {
+        lowerArms = i;
+    }
+
+    public void setHands(int i) {
+        hands = i;
+    }
+
+    public void setTroopCarryingSpace(double d) {
+        troopCarryingSpace = d;
+    }
+
+    public void setASFBays(int i) {
+        aSFBays = i;
+    }
+
+    public void setASFDoors(int i) {
+        aSFDoors = i;
+    }
+
+    public void setASFUnits(double d) {
+        aSFUnits = d;
+    }
+
+    public void setSmallCraftBays(int i) {
+        smallCraftBays = i;
+    }
+
+    public void setSmallCraftDoors(int i) {
+        smallCraftDoors = i;
+    }
+
+    public void setSmallCraftUnits(double d) {
+        smallCraftUnits = d;
+    }
+
+    public void setDockingCollars(int i) {
+        dockingCollars = i;
+    }
+
+    public void setMekBays(int i) {
+        mekBays = i;
+    }
+
+    public void setMekDoors(int i) {
+        mekDoors = i;
+    }
+
+    public void setMekUnits(double d) {
+        mekUnits = d;
+    }
+
+    public void setHeavyVehicleBays(int i) {
+        heavyVehicleBays = i;
+    }
+
+    public void setHeavyVehicleDoors(int i) {
+        heavyVehicleDoors = i;
+    }
+
+    public void setHeavyVehicleUnits(double d) {
+        heavyVehicleUnits = d;
+    }
+
+    public void setLightVehicleBays(int i) {
+        lightVehicleBays = i;
+    }
+
+    public void setLightVehicleDoors(int i) {
+        lightVehicleDoors = i;
+    }
+
+    public void setLightVehicleUnits(double d) {
+        lightVehicleUnits = d;
+    }
+
+    public void setProtoMekBays(int i) {
+        protoMekBays = i;
+    }
+
+    public void setProtoMekDoors(int i) {
+        protoMekDoors = i;
+    }
+
+    public void setProtoMekUnits(double d) {
+        protoMekUnits = d;
+    }
+
+    public void setBattleArmorBays(int i) {
+        battleArmorBays = i;
+    }
+
+    public void setBattleArmorDoors(int i) {
+        battleArmorDoors = i;
+    }
+
+    public void setBattleArmorUnits(double d) {
+        battleArmorUnits = d;
+    }
+
+    public void setInfantryBays(int i) {
+        infantryBays = i;
+    }
+
+    public void setInfantryDoors(int i) {
+        infantryDoors = i;
+    }
+
+    public void setInfantryUnits(double d) {
+        infantryUnits = d;
+    }
+
+    public void setSuperHeavyVehicleBays(int i) {
+        superHeavyVehicleBays = i;
+    }
+
+    public void setSuperHeavyVehicleDoors(int i) {
+        superHeavyVehicleDoors = i;
+    }
+
+    public void setSuperHeavyVehicleUnits(double d) {
+        superHeavyVehicleUnits = d;
+    }
+
+    public void setDropShuttleBays(int i) {
+        dropShuttleBays = i;
+    }
+
+    public void setDropShuttleDoors(int i) {
+        dropShuttleDoors = i;
+    }
+
+    public void setDropShuttleUnits(double d) {
+        dropShuttleUnits = d;
+    }
+
+    public void setBattleArmorHandles(int i) {
+        battleArmorHandles = i;
+    }
+
+    public void setCargoBayUnits(double d) {
+        cargoBayUnits = d;
+    }
+
+    public void setNavalRepairFacilities(int i) {
+        navalRepairFacilities = i;
+    }
+
+    public void setName(String sName) {
+        this.name = sName;
+    }
+
+    public void setChassis(String sChassis) {
+        this.chassis = sChassis;
+    }
+
+    public void setModel(String sModel) {
+        this.model = sModel;
+    }
+
+    public void setMulId(int mulId) {
+        this.mulId = mulId;
+    }
+
+    public void setUnitType(String sUnitType) {
+        this.unitType = sUnitType;
+    }
+
+    public void setSourceFile(File sSourceFile) {
+        this.sourceFile = sSourceFile;
+    }
+
+    public void setInvalid(boolean b) {
+        this.invalid = b;
+    }
+
+    public void setTechLevel(String s) {
+        this.techLevel = s;
+    }
+
+    public void setTechLevelCode(int i) {
+        this.techLevelCode = i;
+    }
+
+    public void setTechRating(@Nullable TechRating techRating) {
+        this.techRating = techRating;
+    }
+
+    public void setTechBase(String s) {
+        this.techBase = s;
+    }
+
+    public void setFailedToLoadEquipment(boolean b) {
+        this.failedToLoadEquipment = b;
+    }
+
+    public void setSource(String sSource) {
+        this.source = sSource;
+    }
+
+    public void setPublished(String published) {
+        this.published = published;
+    }
+
+    public void setNonCanonBySource(boolean nonCanonBySource) {
+        this.nonCanonBySource = nonCanonBySource;
+    }
+
+    public void setEntryName(String sEntryName) {
+        this.entryName = sEntryName;
+    }
+
+    public void setYear(int nYear) {
+        this.year = nYear;
+    }
+
+    public void setType(int nType) {
+        this.type = nType;
+    }
+
+    public void setAltTypes(int[] altTypes) {
+        this.altTypes = altTypes;
+    }
+
+    public void setTons(double nTons) {
+        this.tons = nTons;
+    }
+
+    public void setTOWeight(double TOSuitTons) {
+        this.toSuitTons = TOSuitTons;
+    }
+
+    public void setTWWeight(double TWSuitTons) {
+        this.twSuitTons = TWSuitTons;
+    }
+
+    public void setCost(long nCost) {
+        this.cost = nCost;
+    }
+
+    public void setDryCost(long nCost) {
+        this.dryCost = nCost;
+    }
+
+    public void setAlternateCost(long aCost) {
+        this.altCost = aCost;
+    }
+
+    public void setBV(int nBV) {
+        this.bv = nBV;
+    }
+
+    public void setGenericBattleValue(int genericBattleValue) {
+        this.genericBattleValue = genericBattleValue;
+    }
+
+    public void setModified(long lModified) {
+        this.modified = lModified;
+    }
+
+    public void setLevel(String level) {
+        this.level = level;
+    }
+
+    public void setAdvancedYear(int year) {
+        advTechYear = year;
+    }
+
+    public void setStandardYear(int year) {
+        stdTechYear = year;
+    }
+
+    public void setCanon(boolean canon) {
+        this.canon = canon;
+    }
+
+    public void setPatchwork(boolean patchwork) {
+        this.patchwork = patchwork;
+    }
+
+    public void setFrankenMek(boolean frankenMek) {
+        this.frankenMek = frankenMek;
+    }
+
+    public void setDoomedOnGround(boolean doomedOnGround) {
+        this.doomedOnGround = doomedOnGround;
+    }
+
+    public void setDoomedInAtmosphere(boolean doomedInAtmosphere) {
+        this.doomedInAtmosphere = doomedInAtmosphere;
+    }
+
+    public void setDoomedInSpace(boolean doomedInSpace) {
+        this.doomedInSpace = doomedInSpace;
+    }
+
+    public void setDoomedInExtremeTemp(boolean doomedInExtremeTemp) {
+        this.doomedInExtremeTemp = doomedInExtremeTemp;
+    }
+
+    public void setDoomedInVacuum(boolean doomedInVacuum) {
+        this.doomedInVacuum = doomedInVacuum;
+    }
+
+    public void setClan(boolean clan) {
+        this.clan = clan;
+    }
+
+    public boolean isMixedTech() {
+        return mixedTech;
+    }
+
+    public void setMixedTech(boolean mixedTech) {
+        this.mixedTech = mixedTech;
+    }
+
+    public void setSupport(boolean support) {
+        this.support = support;
+    }
+
+    public void setUnitSubType(String subType) {
+        unitSubType = subType;
+    }
+
+    public void setWeightClass(int weightClass) {
+        this.weightClass = weightClass;
+    }
+
+    public int getWeightClass() {
+        return weightClass;
+    }
+
+    public int getWalkMp() {
+        return walkMp;
+    }
+
+    public void setWalkMp(int walkMp) {
+        this.walkMp = walkMp;
+    }
+
+    public int getRunMp() {
+        return runMp;
+    }
+
+    public void setRunMp(int runMp) {
+        this.runMp = runMp;
+    }
+
+    public int getJumpMp() {
+        return jumpMp;
+    }
+
+    public void setJumpMp(int jumpMp) {
+        this.jumpMp = jumpMp;
+    }
+
+    public void setFluffImage(String base64image) {
+        fluffImage = new Base64Image(base64image);
+    }
+
+    @Override
+    public @Nullable Image getFluffImage() {
+        return fluffImage.getImage();
+    }
+
+    /**
+     * Given the list of equipment mounted on this unit, parse it into a unique list of names and the number of times
+     * that name appears.
+     *
+     * @param mountedList A collection of <code>Mounted</code> equipment
+     */
+    public void setEquipment(List<Mounted<?>> mountedList) {
+        equipmentNames = new Vector<>(mountedList.size());
+        equipmentQuantities = new Vector<>(mountedList.size());
+        for (Mounted<?> mnt : mountedList) {
+            // Ignore weapon groups, as they aren't actually real equipment
+            if (mnt.isWeaponGroup()) {
+                continue;
+            }
+            String eqName = mnt.getType().getInternalName();
+            int index = equipmentNames.indexOf(eqName);
+            if (index == -1) { // We haven't seen this piece of equipment before
+                equipmentNames.add(eqName);
+                equipmentQuantities.add(1);
+            } else { // We've seen this before, update count
+                equipmentQuantities.set(index, equipmentQuantities.get(index) + 1);
+            }
+        }
+    }
+
+    /**
+     * Collects the rules references for all explicit equipment and intrinsic systems that provide structured reference
+     * data, then stores every inclusion-minimal sourcebook combination capable of covering the unit.
+     *
+     * @param entity the source unit
+     */
+    public void setRulesRefs(Entity entity) {
+        rulesRefs = UnitRulesRefUtil.collectRulesRefBuckets(entity);
+    }
+
+    /**
+     * @return alternative sourcebook combinations; owning every book in any one bucket covers this unit
+     */
+    public List<List<SourceBookCode>> getRulesRefs() {
+        return (rulesRefs == null) ? List.of() : rulesRefs;
+    }
+
+    public Vector<String> getEquipmentNames() {
+        return equipmentNames;
+    }
+
+    public Vector<Integer> getEquipmentQuantities() {
+        return equipmentQuantities;
+    }
+
+    public void setQuirkNames(Quirks quirks) {
+        Set<String> quirkNameList = quirks.getOptionsList()
+              .stream()
+              .filter(IOption::booleanValue)
+              .map(IOptionInfo::getDisplayableNameWithValue)
+              .collect(Collectors.toSet());
+        quirkNames = String.join(";", quirkNameList);
+    }
+
+    public String getQuirkNames() {
+        return quirkNames;
+    }
+
+    public void setWeaponQuirkNames(Entity entity) {
+        Set<String> weaponQuirkNameList = new HashSet<>();
+        for (Mounted<?> mounted : entity.getEquipment()) {
+            weaponQuirkNameList.addAll(mounted.getQuirks()
+                  .getOptionsList()
+                  .stream()
+                  .filter(IOption::booleanValue)
+                  .map(IOptionInfo::getDisplayableNameWithValue)
+                  .collect(Collectors.toSet()));
+        }
+        weaponQuirkNames = String.join(";", weaponQuirkNameList);
+    }
+
+    public String getWeaponQuirkNames() {
+        return weaponQuirkNames;
+    }
+
+    public void setTotalArmor(int totalArmor) {
+        this.totalArmor = totalArmor;
+    }
+
+    public EntityMovementMode getMoveMode() {
+        return moveMode;
+    }
+
+    public void setMoveMode(EntityMovementMode moveMode) {
+        this.moveMode = moveMode;
+    }
+
+    public int getTotalArmor() {
+        return totalArmor;
+    }
+
+    public void setTotalInternal(int totalInternal) {
+        this.totalInternal = totalInternal;
+    }
+
+    public int getTotalInternal() {
+        return totalInternal;
+    }
+
+    public void setInternalsType(int internalsType) {
+        this.internalsType = internalsType;
+    }
+
+    public int getInternalsType() {
+        return internalsType;
+    }
+
+    /**
+     * Takes the armor type at all locations and creates a set of the armor types.
+     *
+     * @param locsArmor An array that stores the armor type at each location.
+     */
+    public void setArmorType(int[] locsArmor) {
+        armorTypeSet.clear();
+        for (int value : locsArmor) {
+            armorTypeSet.add(value);
+        }
+    }
+
+    public HashSet<Integer> getArmorType() {
+        return armorTypeSet;
+    }
+
+    public int[] getArmorTypes() {
+        return armorLoc;
+    }
+
+    public void setArmorTypes(int[] al) {
+        armorLoc = al;
+    }
+
+    public int[] getArmorTechTypes() {
+        return armorLocTech;
+    }
+
+    public void setArmorTechTypes(int[] att) {
+        armorLocTech = att;
+    }
+
+    public void setCockpitType(int cockpitType) {
+        this.cockpitType = cockpitType;
+    }
+
+    public int getCockpitType() {
+        return cockpitType;
+    }
+
+    public String getEngineName() {
+        return engineName;
+    }
+
+    public void setEngineName(String engineName) {
+        this.engineName = engineName;
+    }
+
+    public int getEngineType() {
+        return engineType;
+    }
+
+    public void setEngineType(int engineType) {
+        this.engineType = engineType;
+    }
+
+    public int getGyroType() {
+        return gyroType;
+    }
+
+    public void setGyroType(int gyroType) {
+        this.gyroType = gyroType;
+    }
+
+    public String getMyomerName() {
+        return myomerName;
+    }
+
+    public void setMyomerName(String myomerName) {
+        this.myomerName = myomerName;
+    }
+
+    public double getSuitWeight() {
+        return suitWeight;
+    }
+
+    public void setSuitWeight(double suitWeight) {
+        this.suitWeight = suitWeight;
+    }
+
+    public String getExtinctRange() {
+        return extinctRange;
+    }
+
+    public void setAsUnitType(ASUnitType asUnitType) {
+        this.asUnitType = asUnitType;
+    }
+
+    public void setSize(int size) {
+        this.size = size;
+    }
+
+    public void setTmm(int tmm) {
+        this.tmm = tmm;
+    }
+
+    public void setMovement(Map<String, Integer> movement) {
+        this.movement = movement;
+    }
+
+    public void setPrimaryMovementMode(String primaryMovementMode) {
+        this.primaryMovementMode = primaryMovementMode;
+    }
+
+    public void setStandardDamage(ASDamageVector standardDamage) {
+        this.standardDamage = standardDamage;
+    }
+
+    public void setOverheat(int overheat) {
+        this.overheat = overheat;
+    }
+
+    public void setFrontArc(ASArcSummary frontArc) {
+        this.frontArc = frontArc;
+    }
+
+    public void setLeftArc(ASArcSummary leftArc) {
+        this.leftArc = leftArc;
+    }
+
+    public void setRightArc(ASArcSummary rightArc) {
+        this.rightArc = rightArc;
+    }
+
+    public void setRearArc(ASArcSummary rearArc) {
+        this.rearArc = rearArc;
+    }
+
+    public void setThreshold(int threshold) {
+        this.threshold = threshold;
+    }
+
+    public void setFullArmor(int fullArmor) {
+        this.fullArmor = fullArmor;
+    }
+
+    public void setFullStructure(int fullStructure) {
+        this.fullStructure = fullStructure;
+    }
+
+    public void setSquadSize(int squadSize) {
+        this.squadSize = squadSize;
+    }
+
+    public void setPointValue(int pointValue) {
+        this.pointValue = pointValue;
+    }
+
+    public void setSpecialAbilities(ASSpecialAbilityCollection specialAbilities) {
+        this.specialAbilities = specialAbilities;
+    }
+
+    public void setUnitRole(UnitRole role) {
+        this.role = role;
+    }
+
+    public void setExtinctRange(String extinctRange) {
+        this.extinctRange = extinctRange;
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (this == obj) {
+            return true;
+        }
+        if ((obj == null) || (getClass() != obj.getClass())) {
+            return false;
+        }
+        final MekSummary other = (MekSummary) obj;
+        // we match on chassis + model + unit type + source file
+        return Objects.equals(chassis, other.chassis) &&
+              Objects.equals(model, other.model) &&
+              Objects.equals(unitType, other.unitType) &&
+              Objects.equals(sourceFile, other.sourceFile);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(chassis, model, unitType, sourceFile);
+    }
+
+    @Override
+    public boolean showSUA(BattleForceSUA sua) {
+        return !AlphaStrikeHelper.hideSpecial(sua, this);
+    }
+
+    @Override
+    public String formatSUA(BattleForceSUA sua, String delimiter, ASSpecialAbilityCollector collection) {
+        return AlphaStrikeHelper.formatAbility(sua, collection, this, delimiter);
+    }
+
+    /**
+     * Loads and returns the entity for this MekSummary. If the entity cannot be loaded, the error is logged and null is
+     * returned.
+     *
+     * @return The loaded entity or null in case of an error
+     */
+    public @Nullable Entity loadEntity() {
+        try {
+            return new MekFileParser(sourceFile, entryName).getEntity();
+        } catch (Exception ex) {
+            logger.error("", ex);
+            return null;
+        }
+    }
+
+    /**
+     * Loads and returns the entity for the given full name. If the entity cannot be loaded, the error is logged and
+     * null is returned. This is a shortcut for first loading the MekSummary using
+     * {@link MekSummaryCache#getMek(String)} and then {@link #loadEntity()}.
+     *
+     * @return The loaded entity or null in case of an error
+     */
+    public static @Nullable Entity loadEntity(String fullName) {
+        try {
+            MekSummary ms = MekSummaryCache.getInstance().getMek(fullName);
+            if (ms != null) {
+                return new MekFileParser(ms.sourceFile, ms.entryName).getEntity();
+            } else {
+                String message = String.format("MekSummary entry not found for %s", fullName);
+                logger.error(message);
+            }
+        } catch (Exception ex) {
+            logger.error("", ex);
+        }
+        return null;
+    }
+
+    /**
+     * Loads an {@link Entity} directly from the specified unit file.
+     *
+     * <p>Attempts to parse the file using {@code MekFileParser} and retrieve an entity object. If the file does not
+     * contain a valid entity, or an error occurs while reading or parsing, this method logs the error and returns
+     * {@code null}.</p>
+     *
+     * <p><b>Usage:</b> This method is intended for use in tests, so we can easily load in units without needing to
+     * substantiate the entire unit cache.</p>
+     *
+     * @param unitFile the file containing the unit data to load
+     *
+     * @return the loaded {@link Entity}, or {@code null} if loading failed
+     *
+     * @author Illiani
+     * @since 0.50.07
+     */
+    public static @Nullable Entity loadEntity(File unitFile) {
+        try {
+            Entity entity = new MekFileParser(unitFile).getEntity();
+            if (entity != null) {
+                return entity;
+            } else {
+                String message = String.format("MekSummary entry not found for %s", unitFile.getAbsolutePath());
+                // As this method is intended for use in tests, we can't rely on the log, so we include a system
+                // print. This ensures we can easily spot if errors occur and why.
+                System.out.println(message);
+                logger.error(message);
+            }
+        } catch (Exception ex) {
+            logger.error("", ex);
+        }
+        return null;
+    }
+
+    @Override
+    public String toString() {
+        return getName();
+    }
+}

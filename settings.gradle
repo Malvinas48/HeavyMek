@@ -1,0 +1,4 @@
+rootProject.name = 'HeavyMek'
+
+// The game itself lives in the "megamek" folder (MegaMek's layout, kept for now).
+include 'megamek'
