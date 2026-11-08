@@ -11,6 +11,8 @@ HeavyMek only copies what it uses:
 | `images/widgets/` | Images used by the interface skins that HeavyMek keeps (`megamek/mmconf/skins`). |
 | `images/misc/` | HeavyMek's placeholder splash screen, logo and window icons (see below). |
 | `css/`, `mapgen/`, `mapsetup/`, `sounds/` | Small interface, map-generator and sound files. |
+| `heavygear/units/` | HeavyMek's own: the Heavy Gear unit files, one per kind of Gear. Their stats are Dream Pod 9's; keep them private. |
+| `scenarios/heavygear/` | HeavyMek's own: Heavy Gear scenarios and their maps. "Start a Scenario" lists them under the heavygear tab. |
 
 Left out on purpose: BattleTech units and unit art, portraits and camouflage, record sheets, random assignment tables, the BattleTech universe data, MegaMek's map packs, and the other tilesets.
 

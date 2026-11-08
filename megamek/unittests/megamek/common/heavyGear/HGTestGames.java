@@ -17,6 +17,7 @@
 
 package megamek.common.heavyGear;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 
@@ -32,6 +33,12 @@ final class HGTestGames {
 
     static final int NORTH = 0;
     static final int SOUTH = 1;
+
+    /**
+     * The unit files, found by path. Some of MegaMek's own tests point the data folder elsewhere and don't put it
+     * back, so the tests don't rely on it.
+     */
+    static final File UNITS = new File("data/heavygear/units");
 
     private HGTestGames() {
     }
@@ -50,7 +57,7 @@ final class HGTestGames {
 
     static HGUnit gear(String unitFile) {
         try {
-            return new HGUnit(HGUnitLoader.load(unitFile, null));
+            return new HGUnit(HGUnitLoader.load(unitFile, UNITS));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

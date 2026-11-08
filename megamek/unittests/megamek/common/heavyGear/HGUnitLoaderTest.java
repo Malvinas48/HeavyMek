@@ -24,10 +24,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.List;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import megamek.common.Configuration;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.junit.jupiter.api.Test;
 
@@ -38,7 +40,7 @@ class HGUnitLoaderTest {
 
     @Test
     void hunterMatchesItsRecordSheet() throws IOException {
-        HGDatacard hunter = HGUnitLoader.load("hunter", null);
+        HGDatacard hunter = HGUnitLoader.load("hunter", HGTestGames.UNITS);
         assertEquals("Hunter", hunter.name());
         assertEquals(6, hunter.size());
         assertEquals(1, hunter.crew());
@@ -59,7 +61,7 @@ class HGUnitLoaderTest {
 
     @Test
     void hunterWeapons() throws IOException {
-        List<HGWeapon> weapons = HGUnitLoader.load("hunter.yaml", null).weapons();
+        List<HGWeapon> weapons = HGUnitLoader.load("hunter.yaml", HGTestGames.UNITS).weapons();
         HGWeapon autocannon = weapons.get(0);
         assertEquals(FiringArc.F, autocannon.arc());
         assertEquals(0, autocannon.accuracy());
@@ -87,8 +89,8 @@ class HGUnitLoaderTest {
 
     @Test
     void jagerIsTheHuntersMirror() throws IOException {
-        HGDatacard jager = HGUnitLoader.load("jager", null);
-        HGDatacard hunter = HGUnitLoader.load("hunter", null);
+        HGDatacard jager = HGUnitLoader.load("jager", HGTestGames.UNITS);
+        HGDatacard hunter = HGUnitLoader.load("hunter", HGTestGames.UNITS);
         assertEquals(hunter.armor(), jager.armor());
         assertEquals(hunter.threatValue(), jager.threatValue());
         assertEquals(hunter.weapons().size(), jager.weapons().size());
@@ -105,12 +107,23 @@ class HGUnitLoaderTest {
 
     @Test
     void unknownUnitFileIsReported() {
-        assertThrows(IOException.class, () -> HGUnitLoader.load("no-such-gear", null));
+        assertThrows(IOException.class, () -> HGUnitLoader.load("no-such-gear", HGTestGames.UNITS));
+    }
+
+    @Test
+    void unitFilesAreFoundInTheDataFolder() throws IOException {
+        File previous = Configuration.dataDir();
+        try {
+            Configuration.setDataDir(new File("data"));
+            assertEquals("Hunter", HGUnitLoader.load("hunter", null).name());
+        } finally {
+            Configuration.setDataDir(previous);
+        }
     }
 
     @Test
     void unitStartsUndamagedAndCopiesItsWeapons() throws IOException {
-        HGDatacard card = HGUnitLoader.load("hunter", null);
+        HGDatacard card = HGUnitLoader.load("hunter", HGTestGames.UNITS);
         HGUnit first = new HGUnit(card);
         HGUnit second = new HGUnit(card);
         first.weapons().get(0).useAmmo(2);

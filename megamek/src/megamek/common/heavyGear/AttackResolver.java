@@ -74,7 +74,8 @@ public final class AttackResolver {
         log.add(attacker.shortName() + " fires its " + weapon.code() + " at " + target.shortName() + ": "
               + distance + ((distance == 1) ? " hex, " : " hexes, ") + range + " range"
               + ((rof > 0) ? ", burst using ROF " + rof + " (damage x" + damageMultiplier + ")" : "")
-              + ((weapon.ammo() != null) ? "; " + weapon.ammo() + " rounds left." : "."));
+              + ((weapon.ammo() != null) ? "; " + weapon.ammo()
+              + ((weapon.category() == HGWeapon.Category.ROCKET) ? " rockets" : " rounds") + " left." : "."));
 
         List<RollModifier> attackModifiers = AttackRules.attackModifiers(attacker, weapon, from, target, band);
         SkillRoll attack = SkillRoll.roll("Gunnery", attacker.crewLevel().gunnery(), attackModifiers, dice);

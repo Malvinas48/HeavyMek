@@ -42,5 +42,8 @@ public enum GameType {
     TW,
     AS,
     BF,
-    SBF
+    SBF,
+
+    /** Heavy Gear 2nd Edition tactical rules (HeavyMek). */
+    HG
 }

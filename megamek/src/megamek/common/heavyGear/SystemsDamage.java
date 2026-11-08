@@ -61,17 +61,17 @@ public final class SystemsDamage {
      */
     public void apply(HGUnit unit, DamageResult result) {
         switch (result) {
-            case NONE -> log.add(unit.shortName() + " shrugs off the hit.");
+            case NONE -> note(unit.shortName() + " shrugs off the hit.");
             case OVERKILL -> {
                 unit.destroy("overkill");
-                log.add(unit.shortName() + " is destroyed outright (overkill).");
+                note(unit.shortName() + " is destroyed outright (overkill).");
             }
             case LIGHT, HEAVY -> {
                 boolean heavy = (result == DamageResult.HEAVY);
                 unit.loseArmor(heavy ? 2 : 1);
-                log.add(unit.shortName() + " takes " + result + ". Armor is now " + unit.armorThresholds() + ".");
+                note(unit.shortName() + " takes " + result + ". Armor is now " + unit.armorThresholds() + ".");
                 if (unit.isOutOfFight()) {
-                    log.add(unit.shortName() + " is destroyed: " + unit.fateReason() + ".");
+                    note(unit.shortName() + " is destroyed: " + unit.fateReason() + ".");
                     return;
                 }
                 rollMainTable(unit, heavy);
@@ -94,27 +94,27 @@ public final class SystemsDamage {
             int roll = roll();
             switch (roll) {
                 case 1 -> {
-                    log.add(table + " systems damage roll " + roll + ": Fire Control.");
+                    note(table + " systems damage roll " + roll + ": Fire Control.");
                     fireControlSubtable(unit, heavy ? 1 : 0);
                 }
                 case 2 -> {
-                    log.add(table + " systems damage roll " + roll + ": Structure.");
+                    note(table + " systems damage roll " + roll + ": Structure.");
                     structuralSubtable(unit, heavy ? 1 : 0);
                 }
                 case 3 -> {
-                    log.add(table + " systems damage roll " + roll + ": Crew.");
+                    note(table + " systems damage roll " + roll + ": Crew.");
                     crewHit(unit, heavy);
                 }
                 case 4 -> {
-                    log.add(table + " systems damage roll " + roll + ": Movement.");
+                    note(table + " systems damage roll " + roll + ": Movement.");
                     movementHit(unit, heavy);
                 }
                 case 5 -> {
-                    log.add(table + " systems damage roll " + roll + ": Auxiliary systems.");
+                    note(table + " systems damage roll " + roll + ": Auxiliary systems.");
                     auxiliaryHit(unit, heavy);
                 }
                 default -> {
-                    log.add(table + " systems damage roll " + roll + ": roll twice more.");
+                    note(table + " systems damage roll " + roll + ": roll twice more.");
                     pending += 2;
                 }
             }
@@ -135,15 +135,15 @@ public final class SystemsDamage {
                 case 3 -> {
                     unit.weapons().stream().filter(weapon -> !weapon.isDestroyed())
                           .forEach(weapon -> weapon.addDamagePenalty(-1));
-                    log.add(prefix + "-1 to every weapon.");
+                    note(prefix + "-1 to every weapon.");
                 }
                 case 4 -> destroyOneWeapon(unit, prefix);
                 case 5 -> {
                     unit.destroyFireControl();
-                    log.add(prefix + "Fire Control destroyed, -5 to attacks from now on.");
+                    note(prefix + "Fire Control destroyed, -5 to attacks from now on.");
                 }
                 case 6 -> {
-                    log.add(prefix + "roll twice more on the Fire Control table.");
+                    note(prefix + "roll twice more on the Fire Control table.");
                     pending += 2;
                 }
                 default -> ammunitionHit(unit, prefix);
@@ -155,11 +155,11 @@ public final class SystemsDamage {
         int die = roll();
         if (die <= 3) {
             unit.ruptureAmmoStore();
-            log.add(prefix + "ammunition or fuel hit (" + die + "): the store ruptures, " + unit.shortName()
+            note(prefix + "ammunition or fuel hit (" + die + "): the store ruptures, " + unit.shortName()
                   + " can no longer move or fire.");
         } else {
             unit.destroy("its ammunition exploded");
-            log.add(prefix + "ammunition or fuel hit (" + die + "): chain reaction, " + unit.shortName()
+            note(prefix + "ammunition or fuel hit (" + die + "): chain reaction, " + unit.shortName()
                   + " explodes and its crew is killed.");
         }
     }
@@ -174,25 +174,25 @@ public final class SystemsDamage {
             case 2 -> loseMP(unit, true, prefix);
             case 3 -> {
                 unit.addManeuverPenalty(-1);
-                log.add(prefix + "-1 Maneuver (now " + unit.maneuver() + ").");
+                note(prefix + "-1 Maneuver (now " + unit.maneuver() + ").");
             }
             case 4 -> {
                 unit.addManeuverPenalty(-2);
-                log.add(prefix + "-2 Maneuver (now " + unit.maneuver() + ").");
+                note(prefix + "-2 Maneuver (now " + unit.maneuver() + ").");
             }
             case 5 -> {
                 unit.failPowerTransfer();
-                log.add(prefix + "power transfer failure: " + unit.shortName()
+                note(prefix + "power transfer failure: " + unit.shortName()
                       + " cannot move and defends at 0, but can still fire.");
             }
             case 6 -> {
                 int lost = casualties(unit.crew(), 0.75);
                 unit.loseCrew(lost);
-                log.add(prefix + "crew compartment failure, " + lost + " crew lost." + crewStatus(unit));
+                note(prefix + "crew compartment failure, " + lost + " crew lost." + crewStatus(unit));
             }
             default -> {
                 unit.destroy("its structure failed");
-                log.add(prefix + "complete structural failure: " + unit.shortName()
+                note(prefix + "complete structural failure: " + unit.shortName()
                       + " is destroyed, but the crew survives.");
             }
         }
@@ -202,10 +202,10 @@ public final class SystemsDamage {
         if (heavy) {
             int lost = casualties(unit.crew(), 0.1);
             unit.loseCrew(lost);
-            log.add("  " + lost + " crew lost." + crewStatus(unit));
+            note("  " + lost + " crew lost." + crewStatus(unit));
         } else {
             unit.stunCrew();
-            log.add("  Crew stunned: " + unit.shortName() + " loses its next action.");
+            note("  Crew stunned: " + unit.shortName() + " loses its next action.");
         }
     }
 
@@ -213,14 +213,14 @@ public final class SystemsDamage {
         loseMP(unit, heavy, "  ");
         if (heavy) {
             unit.addManeuverPenalty(-2);
-            log.add("  -2 Maneuver (now " + unit.maneuver() + ").");
+            note("  -2 Maneuver (now " + unit.maneuver() + ").");
         }
     }
 
     private void loseMP(HGUnit unit, boolean halve, String prefix) {
         List<HGMovementMode> working = unit.movementModes().stream().filter(mode -> !mode.isKnockedOut()).toList();
         if (working.isEmpty()) {
-            log.add(prefix + "no movement system left to damage.");
+            note(prefix + "no movement system left to damage.");
             return;
         }
         boolean defenderPicks = defenderPicks();
@@ -238,11 +238,11 @@ public final class SystemsDamage {
         } else {
             picked.loseMP(1);
         }
-        log.add(prefix + (halve ? "half the MP" : "-1 MP") + " on " + picked.system() + " (picked by the "
+        note(prefix + (halve ? "half the MP" : "-1 MP") + " on " + picked.system() + " (picked by the "
               + (defenderPicks ? "defender" : "attacker") + "), now Combat " + picked.combat() + " / Top "
               + picked.top() + "." + (picked.isKnockedOut() ? " That system is out." : ""));
         if (unit.isImmobile()) {
-            log.add("  " + unit.shortName() + " can no longer move and defends at 0.");
+            note("  " + unit.shortName() + " can no longer move and defends at 0.");
         }
     }
 
@@ -256,7 +256,7 @@ public final class SystemsDamage {
             working.add("Communications");
         }
         if (working.isEmpty()) {
-            log.add("  " + count + " auxiliary systems hit, but none are left to damage.");
+            note("  " + count + " auxiliary systems hit, but none are left to damage.");
             return;
         }
         List<String> hit = new ArrayList<>(working.subList(0, Math.min(count, working.size())));
@@ -272,29 +272,29 @@ public final class SystemsDamage {
                 unit.addCommunicationsPenalty(heavy ? -5 - unit.communicationsPenalty() : penalty);
             }
         }
-        log.add("  " + count + " auxiliary system(s) hit: " + String.join(" and ", hit)
+        note("  " + count + " auxiliary system(s) hit: " + String.join(" and ", hit)
               + (heavy ? " destroyed." : " -1."));
     }
 
     private void damageOneWeapon(HGUnit unit, int penalty, String prefix) {
         HGWeapon weapon = pickWeapon(unit);
         if (weapon == null) {
-            log.add(prefix + penalty + " to a weapon, but none are left.");
+            note(prefix + penalty + " to a weapon, but none are left.");
             return;
         }
         weapon.addDamagePenalty(penalty);
-        log.add(prefix + penalty + " to " + weapon.code() + " (now " + weapon.damagePenalty() + ")"
+        note(prefix + penalty + " to " + weapon.code() + " (now " + weapon.damagePenalty() + ")"
               + (weapon.isDestroyed() ? ", destroyed." : (weapon.isOutOfAction() ? ", out of action." : ".")));
     }
 
     private void destroyOneWeapon(HGUnit unit, String prefix) {
         HGWeapon weapon = pickWeapon(unit);
         if (weapon == null) {
-            log.add(prefix + "a weapon would be destroyed, but none are left.");
+            note(prefix + "a weapon would be destroyed, but none are left.");
             return;
         }
         weapon.destroy();
-        log.add(prefix + weapon.code() + " destroyed.");
+        note(prefix + weapon.code() + " destroyed.");
     }
 
     /**
@@ -328,6 +328,11 @@ public final class SystemsDamage {
 
     private static String crewStatus(HGUnit unit) {
         return (unit.crew() == 0) ? " " + unit.shortName() + " has no crew left and is out of the fight." : "";
+    }
+
+    /** Adds a line to the log, indented under the attack that caused it. */
+    private void note(String line) {
+        log.add("  " + line);
     }
 
     private boolean canRollAgain() {

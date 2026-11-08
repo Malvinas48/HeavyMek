@@ -64,6 +64,9 @@ import megamek.common.force.Forces;
 import megamek.common.game.AbstractGame;
 import megamek.common.game.Game;
 import megamek.common.game.GameType;
+import megamek.common.heavyGear.HGGame;
+import megamek.common.heavyGear.HGScenarioUnitReader;
+import megamek.common.heavyGear.HGUnit;
 import megamek.common.game.IGame;
 import megamek.common.game.InGameObject;
 import megamek.common.hexArea.HexArea;
@@ -388,7 +391,10 @@ public class ScenarioV2 implements Scenario {
     }
 
     private void parseOptions(IGame game) {
-        var gameOptions = ((GameOptions) game.getOptions());
+        if (!(game.getOptions() instanceof GameOptions gameOptions)) {
+            // HeavyMek: Heavy Gear games have no scenario game options yet
+            return;
+        }
         gameOptions.initialize();
         if (node.has(OPTIONS)) {
             JsonNode optionsNode = node.get(OPTIONS);
@@ -451,6 +457,7 @@ public class ScenarioV2 implements Scenario {
         return switch (getGameType()) {
             case AS -> new ASGame();
             case SBF -> new SBFGame();
+            case HG -> new HGGame();
             default -> new Game();
         };
     }
@@ -604,6 +611,12 @@ public class ScenarioV2 implements Scenario {
                             unit.setForceString("");
                             game.getForces().addEntity(unit, realId);
                         }
+                    }
+                } else if (game instanceof HGGame hgGame) {
+                    for (JsonNode unitNode : unitsNode) {
+                        HGUnit unit = HGScenarioUnitReader.read(unitNode, scenarioDirectory());
+                        unit.setOwnerId(player.getId());
+                        hgGame.addUnit(unit);
                     }
                 } else if (game instanceof SBFGame) {
                     List<InGameObject> units = new MMUReader(scenariofile).read(unitsNode).stream()
