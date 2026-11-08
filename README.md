@@ -10,7 +10,7 @@ Think of MegaMek as a game console with BattleTech as the cartridge. The console
 
 ## What you'll need
 
-- **Java 21.** On Arch or CachyOS, install it with `sudo pacman -S jdk21-openjdk`. Then make it the default with `sudo archlinux-java set java-21-openjdk`, because HeavyMek won't start on Java 17.
+- **Java 21.** On Arch or CachyOS, install it with `sudo pacman -S jdk21-openjdk`. It installs next to any Java you already have, so Java 17 stays. You don't need to change your default Java: the build and `HeavyMek.sh` find Java 21 by themselves.
 - **The Heavy Gear 2nd Edition rulebook**, if you want to know the rules. HeavyMek doesn't include Dream Pod 9's books; the PDFs are sold on DriveThruRPG.
 
 ## Building and running

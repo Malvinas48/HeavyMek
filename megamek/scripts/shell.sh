@@ -32,5 +32,32 @@
 # affiliated with Microsoft.
 
 CDPATH= cd -- "$(dirname -- "$0")/" || exit 1
-# HeavyMek: start the game from its own folder so it finds data/, mmconf/ and docs/.
+
+# HeavyMek needs Java 21 or newer. If JAVA_HOME isn't set and the default `java` is older (for example Java 17,
+# kept as the default for other games), look for an installed Java 21+ and use that, without changing the default.
+java_version() {
+    "$1" -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java\.specification\.version = //p'
+}
+if [ -z "$JAVA_HOME" ]; then
+    current=""
+    if command -v java >/dev/null 2>&1; then
+        current=$(java_version java)
+    fi
+    if [ -z "$current" ] || [ "${current%%.*}" -lt 21 ]; then
+        for candidate in /usr/lib/jvm/java-2[1-9]-openjdk* /usr/lib/jvm/*-2[1-9]* /usr/lib/jvm/java-[3-9][0-9]-openjdk*; do
+            if [ -x "$candidate/bin/java" ]; then
+                JAVA_HOME="$candidate"
+                export JAVA_HOME
+                break
+            fi
+        done
+        if [ -z "$JAVA_HOME" ]; then
+            echo "HeavyMek needs Java 21 or newer, but only found Java ${current:-none}." >&2
+            echo "On Arch or CachyOS, install it with: sudo pacman -S jdk21-openjdk" >&2
+            exit 1
+        fi
+    fi
+fi
+
+# Start the game from its own folder so it finds data/, mmconf/ and docs/.
 exec ./bin/HeavyMek "$@"
