@@ -1,0 +1,452 @@
+/*
+ * Copyright (C) 2024-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+
+package megamek.server.totalWarfare;
+
+import megamek.common.Player;
+import megamek.common.Report;
+import megamek.common.enums.GamePhase;
+import megamek.common.event.GameVictoryEvent;
+import megamek.common.options.IOption;
+import megamek.common.options.OptionsConstants;
+import megamek.common.rules.core.CoreRulesManager;
+import megamek.common.units.Entity;
+import megamek.logging.MMLogger;
+import megamek.server.ServerHelper;
+
+record TWPhaseEndManager(TWGameManager gameManager) {
+
+    /** Feature logger for the objectives diagnostics; enabled via the log4j2.xml VictoryHex block. */
+    private static final MMLogger VICTORY_HEX_LOGGER = MMLogger.create("megamek.feature.VictoryHex");
+    private static final MMLogger LOGGER = MMLogger.create(TWPhaseEndManager.class);
+
+    void managePhase() {
+        switch (gameManager.getGame().getPhase()) {
+            case LOUNGE:
+                gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                // Case for if the options didn't set the rules properly
+                IOption rules_system = gameManager.getGame().getOptions().getOption(OptionsConstants.RULES_SYSTEM);
+                String loadedOption = (gameManager.getGame().rulesManager instanceof CoreRulesManager) ?
+                      OptionsConstants.RULES_CORE : OptionsConstants.RULES_TW;
+                if (rules_system == null) {
+                    gameManager.getGame().initializeRulesManager(OptionsConstants.RULES_CORE);
+                } else if (!rules_system.stringValue().equals(loadedOption)) {
+                    gameManager.getGame().initializeRulesManager(rules_system.stringValue());
+                }
+                gameManager.changePhase(GamePhase.EXCHANGE);
+                break;
+            case EXCHANGE:
+                // a lobby game has already run the objectives pass in executeCurrentPhase; running it
+                // again here would place a player's markers and award their starting points twice
+                gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                leaveTheStartingPhase();
+                break;
+            case STARTING_SCENARIO:
+                // A scenario sets this phase with the plain setter rather than changePhase, and only
+                // changePhase runs executeCurrentPhase - so the objectives pass placed there is dead
+                // code for the one path that needs it. The phase END does run; it is what moves the
+                // game on. Markers themselves arrive with the scenario file; what this pass adds is the
+                // scenario's starting victory points and the warning that nothing can end the game.
+                // scenario units placed with at: skip deployment, which is where a building is written into
+                // its hexes; without this the building fights as a unit on what the map shows as open ground
+                new ScenarioBuildingPlacementHandler(gameManager).placePreDeployedBuildings();
+                gameManager.placeLobbyObjectives();
+                // deliberately not cleared afterwards: nothing reports again until the first initiative
+                // report, so these lines have to survive in the phase report until then. Clearing here
+                // removed them from the round report entirely. The cost is that intermediate phase ends
+                // copy them into the stored round report more than once
+                gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                leaveTheStartingPhase();
+                break;
+            case VICTORY_SETUP:
+                gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                gameManager.changePhase(GamePhase.SET_ARTILLERY_AUTO_HIT_HEXES);
+                break;
+            case SET_ARTILLERY_AUTO_HIT_HEXES:
+                gameManager.sendSpecialHexDisplayPackets();
+                gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                boolean hasMinesToDeploy = gameManager.getGame()
+                      .getPlayersList()
+                      .stream()
+                      .anyMatch(Player::hasMinefields);
+                if (hasMinesToDeploy) {
+                    gameManager.changePhase(GamePhase.DEPLOY_MINEFIELDS);
+                } else {
+                    gameManager.changePhase(GamePhase.INITIATIVE);
+                }
+                break;
+            case DEPLOY_MINEFIELDS:
+                gameManager.changePhase(GamePhase.INITIATIVE);
+                break;
+            case DEPLOYMENT:
+                gameManager.getGame().clearDeploymentThisRound();
+                gameManager.getGame().getPlayersList().forEach(Player::adjustStartingPosForReinforcements);
+                if (gameManager.getGame().getRoundCount() < 1) {
+                    gameManager.changePhase(GamePhase.INITIATIVE);
+                } else {
+                    gameManager.changePhase(GamePhase.TARGETING);
+                }
+                break;
+            case INITIATIVE:
+                gameManager.resolveWhatPlayersCanSeeWhatUnits();
+                gameManager.detectSpacecraft();
+                gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                gameManager.changePhase(GamePhase.INITIATIVE_REPORT);
+                break;
+            case INITIATIVE_REPORT:
+                // NOTE: now that aerospace can come and go from the battlefield, I need to update the
+                // deployment table every round. I think this it is OK to go here. (Taharqa)
+                gameManager.getGame().setupDeployment();
+                // whether there is a deployment phase at all is decided here, and when the answer is no nothing is
+                // said - so a unit that quietly missed its arrival round looks the same as one that never existed
+                DeploymentDiagnostics.logDeploymentDecision(gameManager.getGame());
+                if (gameManager.getGame().shouldDeployThisRound()) {
+                    gameManager.changePhase(GamePhase.DEPLOYMENT);
+                } else {
+                    gameManager.changePhase(GamePhase.TARGETING);
+                }
+                // Clean up bomb icons
+                gameManager.clearBombIcons();
+                gameManager.sendSpecialHexDisplayPackets();
+                break;
+            case PREMOVEMENT:
+                gameManager.changePhase(GamePhase.MOVEMENT);
+                break;
+            case MOVEMENT:
+                gameManager.detectHiddenUnits();
+                // Recon Cameras flown in Reveal mode (TO:AUE p.150)
+                new ReconCameraHandler(gameManager).revealHiddenUnits();
+                ServerHelper.detectMinefields(gameManager.getGame(), gameManager.getMainPhaseReport(), gameManager);
+                gameManager.updateSpacecraftDetection();
+                gameManager.detectSpacecraft();
+                gameManager.resolveWhatPlayersCanSeeWhatUnits();
+                gameManager.doAllAssaultDrops();
+                gameManager.addMovementHeat();
+                gameManager.applyBuildingDamage();
+                gameManager.checkForPSRFromDamage();
+                gameManager.addReport(gameManager.resolvePilotingRolls()); // Skids cause damage in
+                // movement phase
+                gameManager.checkForFlamingDamage();
+                gameManager.checkForTeleMissileAttacks();
+                gameManager.cleanupDestroyedNarcPods();
+                gameManager.checkForFlawedCooling();
+                gameManager.resolveCallSupport();
+                // check phase report
+                if (gameManager.getMainPhaseReport().size() > 1) {
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.changePhase(GamePhase.MOVEMENT_REPORT);
+                } else {
+                    // just the header, so we'll add the <nothing> label
+                    gameManager.addReport(new Report(1205, Report.PUBLIC));
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.sendReport();
+                    gameManager.changePhase(GamePhase.OFFBOARD);
+                }
+                break;
+            case MOVEMENT_REPORT:
+                gameManager.changePhase(GamePhase.OFFBOARD);
+                break;
+            case PRE_FIRING:
+                // Resolve Standard ghost targets before transitioning to FIRING,
+                // so bonuses are active during attack declaration (RAW: "at the start of every Weapon Attack Phase")
+                if (isStandardGhostTargetMode()) {
+                    gameManager.resolveStandardGhostTargets();
+                }
+                gameManager.changePhase(GamePhase.FIRING);
+                break;
+            case FIRING:
+                // write Ranged Attack Phase header
+                gameManager.addReport(new Report(3000, Report.PUBLIC));
+                // Add ghost target reports (resolved during PRE_FIRING, displayed here)
+                gameManager.addGhostTargetReports();
+                gameManager.resolveWhatPlayersCanSeeWhatUnits();
+                gameManager.resolveAllButWeaponAttacks();
+                gameManager.resolveSelfDestruction();
+                if (!isStandardGhostTargetMode()) {
+                    gameManager.reportGhostTargetRolls();
+                }
+                gameManager.reportLargeCraftECCMRolls();
+                gameManager.resolveOnlyWeaponAttacks();
+                gameManager.assignAMS();
+                gameManager.handleAttacks();
+                gameManager.resolveBoobyTraps();  // booby trap says it resolves "immediately"... could be problematic
+                gameManager.resolveScheduledNukes();
+                gameManager.resolveScheduledOrbitalBombardments();
+                gameManager.applyBuildingDamage();
+                gameManager.checkForPSRFromDamage();
+                gameManager.resolveUnJams();
+                gameManager.cleanupDestroyedNarcPods();
+                gameManager.addReport(gameManager.resolvePilotingRolls());
+                gameManager.addReport(gameManager.resolveCrewConsciousness());
+                gameManager.checkForFlawedCooling();
+                // check phase report
+                if (gameManager.getMainPhaseReport().size() > 1) {
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.changePhase(GamePhase.FIRING_REPORT);
+                } else {
+                    // just the header, so we'll add the <nothing> label
+                    gameManager.addReport(new Report(1205, Report.PUBLIC));
+                    gameManager.sendReport();
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.changePhase(GamePhase.PHYSICAL);
+                }
+                gameManager.sendGroundObjectUpdate();
+                // For bomb markers
+                gameManager.sendSpecialHexDisplayPackets();
+                sendFlares();
+                break;
+            case FIRING_REPORT:
+                gameManager.changePhase(GamePhase.PHYSICAL);
+                break;
+            case PHYSICAL:
+                gameManager.resolveWhatPlayersCanSeeWhatUnits();
+                gameManager.resolvePhysicalAttacks();
+                // Process woods clearing completions after all declarations are resolved.
+                // Per TW p.112, terrain converts immediately when threshold is met.
+                gameManager.processWoodsClearingCompletions();
+                gameManager.resolveBoobyTraps(); // booby trap says it resolves "immediately"... could be problematic
+                gameManager.applyBuildingDamage();
+                gameManager.checkForPSRFromDamage();
+                gameManager.addReport(gameManager.resolvePilotingRolls());
+                gameManager.addReport(gameManager.resolveCrewConsciousness());
+                gameManager.resolveSinkVees();
+                gameManager.cleanupDestroyedNarcPods();
+                gameManager.checkForFlawedCooling();
+                gameManager.checkForChainWhipGrappleChecks();
+                // check phase report
+                if (gameManager.getMainPhaseReport().size() > 1) {
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.changePhase(GamePhase.PHYSICAL_REPORT);
+                } else {
+                    // just the header, so we'll add the <nothing> label
+                    gameManager.addReport(new Report(1205, Report.PUBLIC));
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.sendReport();
+                    gameManager.changePhase(GamePhase.PREEND_DECLARATIONS);
+                }
+                gameManager.sendGroundObjectUpdate();
+                break;
+            case PHYSICAL_REPORT:
+                gameManager.changePhase(GamePhase.PREEND_DECLARATIONS);
+                break;
+            case PREEND_DECLARATIONS:
+                // Infantry actions are declared here by both sides and resolved in the End Phase (TO:AR p. 172), so
+                // the separate Infantry vs Infantry Combat phase is no longer entered
+                gameManager.changePhase(GamePhase.END);
+                break;
+            case INFANTRY_VS_INFANTRY_COMBAT:
+                // Actions already added during player turns
+                // No processing needed here - just transition
+                gameManager.changePhase(GamePhase.END);
+                break;
+            case TARGETING:
+                gameManager.getMainPhaseReport().addElement(new Report(1035, Report.PUBLIC));
+                gameManager.resolveAllButWeaponAttacks();
+                gameManager.resolveOnlyWeaponAttacks();
+                gameManager.handleAttacks();
+                // check reports
+                if (gameManager.getMainPhaseReport().size() > 1) {
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.changePhase(GamePhase.TARGETING_REPORT);
+                } else {
+                    // just the header, so we'll add the <nothing> label
+                    gameManager.getMainPhaseReport().addElement(new Report(1205, Report.PUBLIC));
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.sendReport();
+                    gameManager.changePhase(GamePhase.PREMOVEMENT);
+                }
+
+                gameManager.sendSpecialHexDisplayPackets();
+                gameManager.getGame().getPlayersList()
+                      .forEach(player -> gameManager.send(player.getId(), gameManager.createArtilleryPacket(player)));
+                sendFlares();
+                break;
+            case OFFBOARD:
+                // write Offboard Attack Phase header
+                gameManager.addReport(new Report(1100, Report.PUBLIC));
+                gameManager.resolveAllButWeaponAttacks(); // torso twist or flip arms
+                // possible
+                gameManager.resolveOnlyWeaponAttacks(); // should only be TAG at this point
+                gameManager.handleAttacks();
+                gameManager.getGame().getPlayersList()
+                      .forEach(player -> gameManager.send(player.getId(), gameManager.createArtilleryPacket(player)));
+                gameManager.applyBuildingDamage();
+                gameManager.checkForPSRFromDamage();
+                gameManager.addReport(gameManager.resolvePilotingRolls());
+                gameManager.addReport(gameManager.resolveCrewConsciousness());
+
+                gameManager.cleanupDestroyedNarcPods();
+                gameManager.checkForFlawedCooling();
+
+                gameManager.sendSpecialHexDisplayPackets();
+                gameManager.sendTagInfoUpdates();
+
+                // check reports
+                if (gameManager.getMainPhaseReport().size() > 1) {
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.changePhase(GamePhase.OFFBOARD_REPORT);
+                } else {
+                    // just the header, so we'll add the <nothing> label
+                    gameManager.addReport(new Report(1205, Report.PUBLIC));
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.sendReport();
+                    gameManager.changePhase(GamePhase.PRE_FIRING);
+                }
+                sendFlares();
+                break;
+            case OFFBOARD_REPORT:
+                gameManager.sendSpecialHexDisplayPackets();
+                gameManager.changePhase(GamePhase.PRE_FIRING);
+                break;
+            case TARGETING_REPORT:
+                gameManager.changePhase(GamePhase.PREMOVEMENT);
+                break;
+            case END:
+                gameManager.addReport(gameManager.resolveCrewConsciousness());
+                gameManager.addReport(C3EmergencyMasterProcessor.processEndPhase(gameManager.getGame()));
+                // remove any entities that died in the heat/end phase before
+                // checking for victory
+                gameManager.resetEntityPhase(GamePhase.END);
+
+                // Remove expired temporary ECM fields (from EMP mines, etc.)
+                gameManager.getGame().removeExpiredECMFields(
+                      gameManager.getGame().getRoundCount(),
+                      GamePhase.END
+                );
+                // Sync remaining ECM fields to clients
+                gameManager.sendSyncTemporaryECMFields();
+
+                // Scans first: a reading carried home this round is in the tally before control is
+                // resolved and before the victory check reads it
+                gameManager.resolveScans();
+                // Resolve objective control and score victory points before the victory check so the
+                // check sees this round's tally
+                gameManager.resolveObjectives();
+                // resolution writes this round's controller and counters onto the markers; without this
+                // the clients keep the copy they were sent at the end of the physical phase, so anything
+                // drawn from that state - the flag counter, the zone colour - would be a round behind
+                gameManager.sendGroundObjectUpdate();
+
+                boolean victory = gameManager.victory(); // note this may add reports
+                // check phase report
+                // HACK: hardcoded message ID check
+                if ((gameManager.getMainPhaseReport().size() > 3) || ((gameManager.getMainPhaseReport().size() > 1)
+                      && (gameManager.getMainPhaseReport().elementAt(1).messageId != 1205))) {
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.changePhase(GamePhase.END_REPORT);
+                } else {
+                    // just the heat and end headers, so we'll add
+                    // the <nothing> label
+                    gameManager.addReport(new Report(1205, Report.PUBLIC));
+                    gameManager.getGame().addReports(gameManager.getMainPhaseReport());
+                    gameManager.sendReport();
+                    if (victory) {
+                        gameManager.changePhase(GamePhase.VICTORY);
+                    } else {
+                        gameManager.changePhase(GamePhase.INITIATIVE);
+                    }
+                }
+                // Decrement the ASEWAffected counter
+                gameManager.decrementASEWTurns();
+
+                break;
+            case END_REPORT:
+                gameManager.processTeamChangeRequest();
+                if (gameManager.victory()) {
+                    gameManager.changePhase(GamePhase.VICTORY);
+                } else {
+                    gameManager.changePhase(GamePhase.INITIATIVE);
+                }
+                break;
+            case VICTORY:
+                // FIXME: Sending this event here in the Server makes no sense at all, there are no listeners:
+                GameVictoryEvent gve = new GameVictoryEvent(this, gameManager.getGame());
+                gameManager.getGame().processGameEvent(gve);
+
+                gameManager.transmitGameVictoryEventToAll();
+
+                // FIXME: Why force-reset the game? Just let it stand
+                gameManager.resetGame();
+                break;
+            default:
+                break;
+        }
+
+        // Any hidden units that activated this phase, should clear their
+        // activating phase
+        for (Entity ent : gameManager.getGame().getEntitiesVector()) {
+            if (ent.getHiddenActivationPhase() == gameManager.getGame().getPhase()) {
+                ent.setHiddenActivationPhase(GamePhase.UNKNOWN);
+            }
+        }
+    }
+
+    private boolean isStandardGhostTargetMode() {
+        return gameManager.getGame().usesStandardGhostTargetMode();
+    }
+
+    /**
+     * Moves a game out of its starting phase, whether it began in the lobby or from a scenario file.
+     * Objectives are set up before artillery is pre-sighted and mines are laid, because both of those
+     * decisions depend on knowing where the objectives are.
+     */
+    private void leaveTheStartingPhase() {
+        // which starting phase a game leaves from decides whether the objectives pass ran: a lobby game
+        // goes through EXCHANGE, a scenario through STARTING_SCENARIO. Without this the log cannot say
+        // which route was taken, and the two failures look identical
+        VICTORY_HEX_LOGGER.debug("[Objective] leaving the starting phase {}",
+              gameManager.getGame().getPhase());
+        boolean usesObjectives = gameManager.getGame().getOptions()
+              .booleanOption(OptionsConstants.VICTORY_USE_OBJECTIVES);
+        // the ground-object map is keyed by hex alone, with no board id, so objectives can only address
+        // a single-board ground game; multi-board games skip the phase
+        boolean isSingleGroundBoardGame = (gameManager.getGame().getBoards().size() == 1)
+              && gameManager.getGame().getBoard().isGround();
+        if (usesObjectives && isSingleGroundBoardGame) {
+            gameManager.changePhase(GamePhase.VICTORY_SETUP);
+        } else {
+            gameManager.changePhase(GamePhase.SET_ARTILLERY_AUTO_HIT_HEXES);
+        }
+    }
+
+    /**
+     * Sends the flares to the players after an attack phase. An illumination round lights from the turn it arrives
+     * (TO:AR p.152), so its flare must reach the players now, for this turn's to-hit numbers and the board, not only
+     * in the End phase.
+     */
+    private void sendFlares() {
+        LOGGER.debug("[Illumination] sending {} flares after the {} phase", gameManager.getGame().getFlares().size(),
+              gameManager.getGame().getPhase());
+        gameManager.send(gameManager.createFlarePacket());
+    }
+}

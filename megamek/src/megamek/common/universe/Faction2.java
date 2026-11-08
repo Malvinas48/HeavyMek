@@ -1,0 +1,777 @@
+/*
+ * Copyright (C) 2025-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+package megamek.common.universe;
+
+import java.awt.Color;
+import java.io.File;
+import java.io.IOException;
+import java.util.*;
+
+import com.fasterxml.jackson.annotation.JsonGetter;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.module.SimpleModule;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
+import jakarta.annotation.Nullable;
+import megamek.MMConstants;
+import megamek.client.ratgenerator.FactionRecord;
+
+/**
+ * This is a Faction class that unifies MHQ's Faction and the RATGenerator's FactionRecord and makes it available to all
+ * project parts. The class encompasses both factions such as the Lyran Alliance or Clan Ghost Bear as well as commands
+ * such as the Capellan Brigade or the Hesperus Guards as both are used to generate RATs and both could potentially be
+ * used as a playable faction. It may be that later on, commands and factions will be separated.
+ * <p>
+ * To limit the changes, the original Faction and FactionRecord classes are - at least for now - kept largely unchanged,
+ * but they now use the data of this class instead of loading their own data.
+ * <p>
+ * The alternate faction codes and parent factions properties of the two original faction types have been lumped
+ * together. They were sometimes equal, sometimes not. Both were used for RAT generation purposes. The alternate names
+ * feature (independent of year) of MHQ factions has been dropped as it was not used anywhere. Currency codes are
+ * currently not part of this Faction class as there was no data for it
+ * <p>
+ * Notes for future improvements: There are multiple fallback factions. This may be useful for providing entertaining
+ * fallback RATs but a single chain of parent factions may be more useful for other data. Commands could be given a list
+ * of specific camos. Specific dates could be used instead of years. Rating levels could be gathered from fallback to
+ * avoid repetition.
+ */
+@SuppressWarnings("unused") // Class fields are assigned when factions are loaded from YAML files
+@JsonPropertyOrder({ "key", "name", "sucsCodes", "nameChanges", "aliases", "capital", "capitalChanges", "yearsActive", "successor",
+                     "tags", "color", "icon", "iconChanges", "logo", "logoChanges", "background", "backgroundChanges", "camos", "camosChanges", "nameGenerator", "eraMods",
+                     "ratingLevels", "fallBackFactions", "preInvasionHonorRating", "postInvasionHonorRating",
+                     "formationBaseSize", "formationGrouping", "rankSystem", "factionLeaders", "usesMercenaries",
+                     "aresConventionsSignatory", "subunits" })
+public class Faction2 {
+    private static final int UNKNOWN = -1;
+    private static final String DEFAULT_RANK_SYSTEM_INNER_SPHERE = "SLDF";
+    private static final String DEFAULT_RANK_SYSTEM_CLAN = "CLAN";
+
+    private String key;
+    private String name;
+    private final Set<String> sucsCodes = new LinkedHashSet<>();
+    private final NavigableMap<Integer, String> nameChanges = new TreeMap<>();
+    private final NavigableMap<Integer, String> aliases = new TreeMap<>();
+    private String capital;
+    private final NavigableMap<Integer, String> capitalChanges = new TreeMap<>();
+    private final ArrayList<FactionRecord.DateRange> yearsActive = new ArrayList<>();
+    private String successor;
+    private final Set<FactionTag> tags = new HashSet<>();
+    private final Color color = Color.LIGHT_GRAY;
+    private String icon;
+    private final NavigableMap<Integer, String> iconChanges = new TreeMap<>();
+
+    // Faction logos were replaced by icons; older faction files (e.g. in a user dir) may still contain them
+    @JsonProperty("logo")
+    private String legacyLogo;
+
+    @JsonProperty("logoChanges")
+    private final NavigableMap<Integer, String> legacyLogoChanges = new TreeMap<>();
+
+    private String background;
+    private final NavigableMap<Integer, String> backgroundChanges = new TreeMap<>();
+
+    @JsonProperty("camos")
+    private String camosFolder;
+
+    private final NavigableMap<Integer, String> camosChanges = new TreeMap<>();
+    private String nameGenerator;
+    private int[] eraMods;
+    private final List<String> ratingLevels = new ArrayList<>();
+    // The order is the lookup order, so Jackson must not replace this with its default HashSet. It did, and the Raven
+    // Alliance (CSR, OA, CLAN.IS) resolved to the Outworlds Alliance's rules ahead of Clan Snow Raven's.
+    @JsonDeserialize(as = LinkedHashSet.class)
+    private final Set<String> fallBackFactions = new LinkedHashSet<>();
+    private final HonorRating preInvasionHonorRating = HonorRating.NONE;
+    private final HonorRating postInvasionHonorRating = HonorRating.NONE;
+    // Do not final the variables
+    private int formationBaseSize = UNKNOWN;
+    private int formationGrouping = UNKNOWN;
+    private String rankSystem = null;
+    private List<FactionLeaderData> factionLeaders = new ArrayList<>();
+    private final NavigableMap<Integer, Boolean> usesMercenaries = new TreeMap<>();
+    private final NavigableMap<Integer, Boolean> aresConventionsSignatory = new TreeMap<>();
+    private final Map<String, Faction2> subunits = new LinkedHashMap<>();
+
+    /**
+     * The key of the faction that declared this one as a subunit, or {@code null} when this faction has a file of its
+     * own. Derived at load time from the file structure rather than read from YAML, so it is never written back out.
+     */
+    @JsonIgnore
+    private String parentCommand;
+
+    public List<String> getRatingLevels() {
+        return ratingLevels;
+    }
+
+    /**
+     * Returns the subordinate formations declared inside this faction's own file, keyed by the short identifier used
+     * in the YAML file rather than by their full key. A command such as the St. Ives Lancers declares its regiments
+     * here instead of each regiment needing a separate file:
+     *
+     * <pre>
+     * key: CC.SIL
+     * name: St. Ives Lancers
+     * subunits:
+     *   1st:
+     *     name: 1st St. Ives Lancers
+     * </pre>
+     *
+     * <p>Subunits are a file-organisation convenience only. At load time {@link SubunitRegistrar} registers each one
+     * as a full faction in its own right under the composed key {@code CC.SIL.1st}, so everything that consumes
+     * factions - the lobby, RAT generation, MekHQ - sees a flat list and needs no knowledge of the nesting.</p>
+     *
+     * @return The subunits declared in this faction's file, in declaration order. Never {@code null}.
+     */
+    public Map<String, Faction2> getSubunits() {
+        return subunits;
+    }
+
+    /**
+     * Returns the key of the command that declared this faction as one of its {@link #getSubunits() subunits}, if any.
+     *
+     * <p>This is set only for factions that came from inside another faction's file, such as the 1st St. Ives Lancers
+     * declared inside {@code CC.SIL}. A command written in its own file returns {@code null} even when it falls back
+     * to another command, because falling back is not the same as being declared inside it.</p>
+     *
+     * @return The declaring command's key, or {@code null} when this faction has its own file
+     */
+    @JsonIgnore
+    public @Nullable String getParentCommand() {
+        return parentCommand;
+    }
+
+    /**
+     * Returns whether this faction was declared inside another faction's file rather than having a file of its own.
+     *
+     * <p>Useful where only whole commands should be offered rather than their individual regiments - the Force
+     * Generator's sub-faction list, for example, shows the St. Ives Lancers but not their seven regiments.</p>
+     *
+     * @return {@code true} if this faction is a subunit of another
+     */
+    @JsonIgnore
+    public boolean isSubunit() {
+        return parentCommand != null;
+    }
+
+    /**
+     * Records the command that declared this faction as a subunit. Package-private because it is derived from the
+     * file structure at load time by {@link SubunitRegistrar}, never read from YAML.
+     *
+     * @param parentCommand The declaring command's key
+     */
+    void setParentCommand(String parentCommand) {
+        this.parentCommand = parentCommand;
+    }
+
+    /**
+     * Sets this faction's key. Package-private because a key normally comes from the YAML file; it is assigned after
+     * loading only for {@link #getSubunits() subunits}, whose key is composed from their parent's key and their
+     * identifier within it.
+     *
+     * @param key The full faction key, such as {@code CC.SIL.1st}
+     */
+    void setKey(String key) {
+        this.key = key;
+    }
+
+    /**
+     * Sets the personnel name generator. Package-private because it is normally read from the YAML file; it is
+     * assigned after loading only when a subunit inherits its parent's generator.
+     *
+     * @param nameGenerator The name generator to use, such as {@code Clan}
+     */
+    void setNameGenerator(@Nullable String nameGenerator) {
+        this.nameGenerator = nameGenerator;
+    }
+
+    public String getKey() {
+        return key;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public String getName(int year) {
+        final Map.Entry<Integer, String> nameByYear = nameChanges.floorEntry(year);
+        return (nameByYear == null) ? name : nameByYear.getValue();
+    }
+
+    /**
+     * Returns the SUCS (Sarna Unified Cartography Kit) faction codes that map to this MegaMek faction. A single MegaMek
+     * faction may correspond to multiple SUCS codes when SUCS uses different identifiers across historical eras of the
+     * same political entity (e.g. {@code LC} for the Lyran Commonwealth and {@code LA} for its successor the Lyran
+     * Alliance, both of which map to MegaMek's {@code LA}).
+     *
+     * <p>Used by SUCS data import tooling to translate SUCS faction codes into MegaMek codes. An empty set means no
+     * SUCS equivalent has been identified.</p>
+     *
+     * @return The SUCS codes that map to this faction, in insertion order. Never {@code null}.
+     */
+    public Set<String> getSucsCodes() {
+        return sucsCodes;
+    }
+
+    public Set<FactionTag> getTags() {
+        return tags;
+    }
+
+    public List<FactionRecord.DateRange> getYearsActive() {
+        return yearsActive;
+    }
+
+    public String getBackground() {
+        return background;
+    }
+
+    /**
+     * Returns the faction's background image path for the given year, honoring any era-based
+     * {@link #getBackgroundChanges() background changes}. Falls back to the base {@link #getBackground() background}
+     * when no change applies for the year.
+     *
+     * @param year the game year to resolve the background for
+     *
+     * @return the era-appropriate background image path, or the base background when none applies
+     */
+    public String getBackground(int year) {
+        final Map.Entry<Integer, String> backgroundByYear = backgroundChanges.floorEntry(year);
+        return (backgroundByYear == null) ? background : backgroundByYear.getValue();
+    }
+
+    public NavigableMap<Integer, String> getBackgroundChanges() {
+        return backgroundChanges;
+    }
+
+    public String getIcon() {
+        return icon;
+    }
+
+    /**
+     * Returns the file name of the faction's icon for the given year, honoring any era-based
+     * {@link #getIconChanges() icon changes}. Falls back to the base {@link #getIcon() icon} when no change applies
+     * for the year. Icon files are found in {@code data/images/universe/factions/}.
+     *
+     * @param year the game year to resolve the icon for
+     *
+     * @return the era-appropriate icon file name, or the base icon when none applies
+     */
+    public String getIcon(int year) {
+        final Map.Entry<Integer, String> iconByYear = iconChanges.floorEntry(year);
+        return (iconByYear == null) ? icon : iconByYear.getValue();
+    }
+
+    public NavigableMap<Integer, String> getIconChanges() {
+        return iconChanges;
+    }
+
+    /**
+     * Returns the faction's legacy logo for the given year, honoring any era-based logo changes. Legacy logos predate
+     * {@link #getIcon(int) icons} and are only read so that older faction files (e.g. custom factions in a user dir)
+     * keep working. Unlike icons, they are paths relative to MekHQ's formation icon logo directory
+     * ({@code data/images/force/Pieces/Logos/}).
+     *
+     * @param year the game year to resolve the logo for
+     *
+     * @return the era-appropriate legacy logo path, or {@code null} if the faction has none
+     */
+    public @Nullable String getLegacyLogo(int year) {
+        final Map.Entry<Integer, String> logoByYear = legacyLogoChanges.floorEntry(year);
+        return (logoByYear == null) ? legacyLogo : logoByYear.getValue();
+    }
+
+    /**
+     * Returns {@code true} when the faction names a {@link #getLegacyLogo(int) legacy logo} but no
+     * {@link #getIcon(int) icon}. MegaMek only shows icons, so such a faction, typically a custom one written for
+     * MekHQ, gets the generic logo instead of its own.
+     *
+     * @return {@code true} if the faction has a legacy logo and no icon
+     */
+    public boolean hasLegacyLogoWithoutIcon() {
+        boolean hasIcon = ((icon != null) && !icon.isBlank()) || !iconChanges.isEmpty();
+        boolean hasLegacyLogo = ((legacyLogo != null) && !legacyLogo.isBlank()) || !legacyLogoChanges.isEmpty();
+        return hasLegacyLogo && !hasIcon;
+    }
+
+    public int[] getEraMods() {
+        return eraMods;
+    }
+
+    public String getSuccessor() {
+        return successor;
+    }
+
+    public String getCapital() {
+        return capital;
+    }
+
+    public Color getColor() {
+        return color;
+    }
+
+    public String getNameGenerator() {
+        return nameGenerator;
+    }
+
+    /**
+     * Returns the pre-invasion honor rating assigned to this faction, if any.
+     *
+     * <p>This method provides direct access to the stored {@link HonorRating} value representing the faction's honor
+     * rating before the invasion period. No default or fallback value is applied.</p>
+     *
+     * <p><b>Usage:</b> this method is for directly retrieving the value stored in {@code preInvasionHonorRating},
+     * generally you'll want to use {@link #getPreInvasionHonorRating()} instead, as that includes essential fallback
+     * values.</p>
+     *
+     * @return the pre-invasion {@link HonorRating}, or {@code null} if not set
+     */
+    public HonorRating getPreInvasionHonorRatingDirect() {
+        return preInvasionHonorRating;
+    }
+
+    /**
+     * Calculates and returns the effective pre-invasion honor rating for this faction.
+     *
+     * <p>For Clan factions, returns the stored honor rating if it is set and not {@link HonorRating#NONE};
+     * otherwise, returns {@link HonorRating#STRICT} as the default. For non-Clan factions, this simply returns the
+     * stored honor rating, which will likely be {@link HonorRating#NONE}.</p>
+     *
+     * <p><b>Usage:</b> this method is the primary way to retrieve a faction's pre-invasion honor rating. However,
+     * as it includes fallback values, if you want to directly access the value stored in {@code preInvasionHonorRating}
+     * you will want to call {@link #getPreInvasionHonorRatingDirect()}, instead.</p>
+     *
+     * @return the effective pre-invasion {@link HonorRating} for the faction
+     */
+    public HonorRating getPreInvasionHonorRating() {
+        if (isClan()) {
+            return (preInvasionHonorRating != HonorRating.NONE) ? preInvasionHonorRating : HonorRating.STRICT;
+        } else {
+            return preInvasionHonorRating;
+        }
+    }
+
+    /**
+     * Returns the post-invasion honor rating assigned to this faction, if any.
+     *
+     * <p>This method provides direct access to the stored {@link HonorRating} value representing the faction's honor
+     * rating after the invasion period. No default or fallback value is applied.</p>
+     *
+     * <p><b>Usage:</b> this method is for directly retrieving the value stored in {@code postInvasionHonorRating},
+     * generally you'll want to use {@link #getPostInvasionHonorRating()} instead, as that includes essential fallback
+     * values.</p>
+     *
+     * @return the pre-invasion {@link HonorRating}, or {@code null} if not set
+     */
+    public HonorRating getPostInvasionHonorRatingDirect() {
+        return postInvasionHonorRating;
+    }
+
+    /**
+     * Calculates and returns the effective post-invasion honor rating for this faction.
+     *
+     * <p>For Clan factions, returns the stored honor rating if it is set and not {@link HonorRating#NONE};
+     * otherwise, returns {@link HonorRating#OPPORTUNISTIC} as the default. For non-Clan factions, this simply returns
+     * the stored honor rating, which will likely be {@link HonorRating#NONE}.</p>
+     *
+     * <p><b>Usage:</b> this method is the primary way to retrieve a faction's post-invasion honor rating. However,
+     * as it includes fallback values, if you want to directly access the value stored in
+     * {@code postInvasionHonorRating} you will want to call {@link #getPostInvasionHonorRatingDirect()}, instead.</p>
+     *
+     * @return the effective post-invasion {@link HonorRating} for the faction
+     */
+    public HonorRating getPostInvasionHonorRating() {
+        if (isClan()) {
+            return (postInvasionHonorRating != HonorRating.NONE) ? postInvasionHonorRating : HonorRating.OPPORTUNISTIC;
+        } else {
+            return postInvasionHonorRating;
+        }
+    }
+
+    public String getCamosFolder(int year) {
+        final Map.Entry<Integer, String> folderByYear = camosChanges.floorEntry(year);
+        return (folderByYear == null) ? camosFolder : folderByYear.getValue();
+    }
+
+    public NavigableMap<Integer, String> getCamosChanges() {
+        return camosChanges;
+    }
+
+    public NavigableMap<Integer, String> getNameChanges() {
+        return nameChanges;
+    }
+
+    /**
+     * Returns the historical faction-code aliases for this faction, keyed by the year each alias became active.
+     * When a faction is the consolidation of an earlier faction that was renamed (for example Clan Goliath Scorpion
+     * becoming the Escorpion Imperio in 3080), the retired faction code is kept here as an alias of the surviving
+     * key, so that saved games, planetary ownership and RAT availability tables that still reference the old code
+     * continue to resolve to this faction.
+     *
+     * <p>Aliases are for <em>rename lineages</em> only - a single entity renamed over time, with disjoint date
+     * ranges. They must not be used for a merger of two distinct factions (for example Clan Snow Raven and the
+     * Outworlds Alliance both becoming the Raven Alliance); those relationships belong in
+     * {@link #getFallBackFactions()} instead.</p>
+     *
+     * @return The alias codes keyed by the year each became active, in ascending year order. Never {@code null}.
+     */
+    public NavigableMap<Integer, String> getAliases() {
+        return aliases;
+    }
+
+    public NavigableMap<Integer, String> getCapitalChanges() {
+        return capitalChanges;
+    }
+
+    public NavigableMap<Integer, Boolean> getUsesMercenaries() {
+        return usesMercenaries;
+    }
+
+    public NavigableMap<Integer, Boolean> getAresConventionsSignatory() {
+        return aresConventionsSignatory;
+    }
+
+    public Set<String> getFallBackFactions() {
+        return fallBackFactions;
+    }
+
+    /**
+     * Returns the size of the lowest formation type (lance). If this faction gives the size directly
+     * (formationBaseSize) this value is returned. Otherwise, the fallback Factions are called recursively. When there
+     * is no callback Faction, 5 is returned for a clan faction and 4 otherwise.
+     * <p>
+     * This means that the Word of Blake Faction will give a value of 6 and WoB subcommands do not have to give any
+     * value as long as their fallback Faction is WoB.
+     *
+     * @return The size of a lance, point or analogous formation type
+     */
+    public int getFormationBaseSize() {
+        if (formationBaseSize != UNKNOWN) {
+            return formationBaseSize;
+        } else if (!fallBackFactions.isEmpty()) {
+            for (String factionCode : fallBackFactions) {
+                Optional<Faction2> fallBackFaction = Factions2.getInstance().getFaction(factionCode);
+                if (fallBackFaction.isPresent()) {
+                    return fallBackFaction.get().getFormationBaseSize();
+                }
+            }
+        }
+        return isClan() ? 5 : 4;
+    }
+
+    /**
+     * Returns the grouping multiplier for accumulated formations such as company, galaxy or level 3. If this faction
+     * gives the value directly (formationGrouping) this value is returned. Otherwise, the fallback Factions are called
+     * recursively. When there is no callback Faction, 5 is returned for a clan faction and 3 otherwise (3 lances form a
+     * company, 3 companies form a battalion etc.)
+     * <p>
+     * This means that the Word of Blake Faction will give a value of 6 and WoB subcommands do not have to give any
+     * value as long as their fallback Faction is WoB.
+     *
+     * @return How many formations form a formation of a higher type (e.g., lances in a company)
+     */
+    public int getFormationGrouping() {
+        if (formationGrouping != UNKNOWN) {
+            return formationGrouping;
+        } else if (!fallBackFactions.isEmpty()) {
+            for (String factionCode : fallBackFactions) {
+                Optional<Faction2> fallBackFaction = Factions2.getInstance().getFaction(factionCode);
+                if (fallBackFaction.isPresent()) {
+                    return fallBackFaction.get().getFormationGrouping();
+                }
+            }
+        }
+        return isClan() ? 5 : 3;
+    }
+
+    /**
+     * Retrieves the rank system identifier for this faction.
+     *
+     * <p>The method checks the `rankSystem` field; if it is set and not {@code null}, its value is returned
+     * directly.</p>
+     *
+     * <p>If the rank system is unspecified but there are fallback factions, the method iterates through each
+     * fallback faction, returning the first available rank system found among them.</p>
+     *
+     * <p>If no fallback faction provides a rank system, the method returns a default value based on whether the
+     * faction is a clan or not.</p>
+     *
+     * @return the rank system identifier for this faction, or a default value ({@link #DEFAULT_RANK_SYSTEM_CLAN} for
+     *       Clan factions, {@link #DEFAULT_RANK_SYSTEM_INNER_SPHERE} for non-Clan factions) if not specified.
+     *
+     * @author Illiani
+     * @since 0.50.07
+     */
+    public String getRankSystem() {
+        if (rankSystem != null) {
+            return rankSystem;
+        } else if (!fallBackFactions.isEmpty()) {
+            for (String factionCode : fallBackFactions) {
+                Optional<Faction2> fallBackFaction = Factions2.getInstance().getFaction(factionCode);
+                if (fallBackFaction.isPresent()) {
+                    return fallBackFaction.get().getRankSystem();
+                }
+            }
+        }
+        return isClan() ? DEFAULT_RANK_SYSTEM_CLAN : DEFAULT_RANK_SYSTEM_INNER_SPHERE;
+    }
+
+    /**
+     * Returns the list of leaders for this faction.
+     *
+     * @return a list containing all {@link FactionLeaderData} objects associated with this faction
+     *
+     * @author Illiani
+     * @since 0.50.07
+     */
+    public List<FactionLeaderData> getFactionLeaders() {
+        return factionLeaders;
+    }
+
+    /**
+     * Sets the list of leaders for this faction.
+     *
+     * @param factionLeaders the list of {@link FactionLeaderData} to associate with this faction
+     *
+     * @author Illiani
+     * @since 0.50.07
+     */
+    public void setFactionLeaders(List<FactionLeaderData> factionLeaders) {
+        this.factionLeaders = factionLeaders;
+    }
+
+    /**
+     * Retrieves the faction leader in power during the specified year.
+     *
+     * @param year the year to check for a valid leader
+     *
+     * @return the {@link FactionLeaderData} for the leader valid in the given year, or {@code null} if none found
+     *
+     * @author Illiani
+     * @since 0.50.07
+     */
+    public @Nullable FactionLeaderData getFactionLeaderForYear(final int year) {
+        for (FactionLeaderData leader : factionLeaders) {
+            if (leader.isValidInYear(year)) {
+                return leader;
+            }
+        }
+        return null;
+    }
+
+    @JsonIgnore
+    public boolean isClan() {
+        return is(FactionTag.CLAN);
+    }
+
+    @JsonIgnore
+    public boolean isPeriphery() {
+        return is(FactionTag.PERIPHERY);
+    }
+
+    @JsonIgnore
+    public boolean isMinorPower() {
+        return is(FactionTag.MINOR);
+    }
+
+    @JsonIgnore
+    public boolean isMilitia() {
+        return is(FactionTag.MILITIA);
+    }
+
+    public boolean is(FactionTag tag) {
+        return tags.contains(tag);
+    }
+
+    /**
+     * @return True when this faction is active in the given year.
+     */
+    public boolean isActiveInYear(int year) {
+        return yearsActive.isEmpty() || yearsActive.stream().anyMatch(dr -> dr.isInRange(year));
+    }
+
+    /**
+     * Writes this faction as YAML to the given file.
+     *
+     * @param file The file to write to.
+     *
+     * @throws IOException When an error occurs
+     */
+    public void saveToFile(File file) throws IOException {
+        ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory()
+              .disable(YAMLGenerator.Feature.WRITE_DOC_START_MARKER)
+              .disable(YAMLGenerator.Feature.SPLIT_LINES)
+              .enable(YAMLGenerator.Feature.MINIMIZE_QUOTES)
+              .enable(YAMLGenerator.Feature.INDENT_ARRAYS_WITH_INDICATOR));
+        SimpleModule module = new SimpleModule();
+        module.addSerializer(Color.class, new ColorSerializer());
+        yamlMapper.registerModule(module);
+        yamlMapper.setDefaultPropertyInclusion(JsonInclude.Include.NON_EMPTY);
+        yamlMapper.writeValue(file, this);
+    }
+
+    /**
+     * Writes this faction as YAML to the standard directories in data/universe/factions or data/universe/commands with
+     * the standard name (key).yml, depending on whether the key contains a "."
+     *
+     * @throws IOException When an error occurs
+     */
+    public void saveToFile() throws IOException {
+        String path = key.contains(".") ? MMConstants.COMMANDS_DIR : MMConstants.FACTIONS_DIR;
+        saveToFile(new File(path, key + ".yml"));
+    }
+
+    /**
+     * Writes this faction with updates from a changed FactionRecord as YAML to the given file. This method is hopefully
+     * temporary; it is used for RatGeneratorEditor changes while FactionRecord stays a separate class. Note that this
+     * method applies the changes to the "real" faction and keeps the change for the present runtime.
+     *
+     * @param updatedRecord A FactionRecord with changes to apply to the present faction and save to file
+     *
+     * @throws IOException When an error occurs
+     */
+    public void saveToFile(FactionRecord updatedRecord) throws IOException {
+        // apply FR changes
+        key = updatedRecord.getKey();
+        name = updatedRecord.getName();
+        if (updatedRecord.isMinor()) {
+            tags.add(FactionTag.MINOR);
+        } else {
+            tags.remove(FactionTag.MINOR);
+        }
+        if (updatedRecord.isPeriphery()) {
+            tags.add(FactionTag.PERIPHERY);
+        } else {
+            tags.remove(FactionTag.PERIPHERY);
+        }
+        if (updatedRecord.isClan()) {
+            tags.add(FactionTag.CLAN);
+        } else {
+            tags.remove(FactionTag.CLAN);
+        }
+        fallBackFactions.clear();
+        fallBackFactions.addAll(updatedRecord.getParentFactions());
+        fallBackFactions.remove("");
+        ratingLevels.clear();
+        ratingLevels.addAll(updatedRecord.getRatingLevels());
+        yearsActive.clear();
+        yearsActive.addAll(updatedRecord.getYears());
+        nameChanges.clear();
+        nameChanges.putAll(updatedRecord.getAltNames());
+        saveToFile();
+    }
+
+    // specialized methods for YAML serialization
+
+    @JsonGetter("preInvasionHonorRating")
+    private HonorRating preInvasionHonorRatingSerializer() {
+        return preInvasionHonorRating;
+    }
+
+    @JsonGetter("postInvasionHonorRating")
+    private HonorRating getPostInvasionHonorRatingSerializer() {
+        return postInvasionHonorRating;
+    }
+
+    @JsonGetter("formationGrouping")
+    private Integer originalFormationGrouping() {
+        return formationGrouping != UNKNOWN ? formationGrouping : null;
+    }
+
+    @JsonGetter("formationBaseSize")
+    private Integer originalFormationBaseSize() {
+        return formationBaseSize != UNKNOWN ? formationBaseSize : null;
+    }
+
+    @JsonGetter("rankSystem")
+    private String originalRankSystem() {
+        return !Objects.equals(rankSystem, UNKNOWN + "") ? rankSystem : null;
+    }
+
+    @JsonGetter("factionLeaders")
+    private List<FactionLeaderData> originalFactionLeaders() {
+        return !Objects.equals(factionLeaders, new ArrayList<>()) ? factionLeaders : null;
+    }
+
+    @JsonGetter("tags") // sorts tags alphabetically (would be random otherwise)
+    private List<FactionTag> tagsSerializer() {
+        return tags.stream().sorted(Comparator.comparing(Enum::name)).toList();
+    }
+
+    /**
+     * @return True if this faction performs BatchAlls.
+     */
+    public boolean performsBatchalls() {
+        return tags.contains(FactionTag.BATCHALL);
+    }
+
+    /**
+     * @return {@code true} if the faction is an aggregate of independent 'factions', rather than a singular
+     *       organization.
+     *
+     *       <p>For example, "PIR" (pirates) is used to abstractly represent all pirates, not individual pirate
+     *       groups.</p>
+     *
+     * @author Illiani
+     * @since 0.50.07
+     */
+    public boolean isAggregate() {
+        return tags.contains(FactionTag.AGGREGATE);
+    }
+
+    public Boolean isUsesMercenaries(int year) {
+        final Map.Entry<Integer, Boolean> isUseMercenaries = usesMercenaries.floorEntry(year);
+        return isUseMercenaries == null || isUseMercenaries.getValue();
+    }
+
+    /**
+     * Whether this faction was a signatory of the Ares Conventions - and thus observed their restrictions on targeting
+     * population centers - in the given year. Defaults to {@code false} for years with no recorded signatory status.
+     *
+     * @param year the year to check
+     *
+     * @return {@code true} if the faction observed the Ares Conventions in that year
+     */
+    public boolean isAresConventionsSignatory(int year) {
+        final Map.Entry<Integer, Boolean> signatory = aresConventionsSignatory.floorEntry(year);
+        return (signatory != null) && signatory.getValue();
+    }
+
+    @Override
+    public String toString() {
+        return key;
+    }
+}

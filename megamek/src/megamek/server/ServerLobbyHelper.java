@@ -1,0 +1,602 @@
+/*
+ * Copyright (C) 2021-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+
+package megamek.server;
+
+import static java.util.stream.Collectors.toList;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import jakarta.annotation.Nullable;
+import megamek.common.Player;
+import megamek.common.force.Force;
+import megamek.common.force.Forces;
+import megamek.common.game.Game;
+import megamek.common.interfaces.ForceAssignable;
+import megamek.common.net.enums.PacketCommand;
+import megamek.common.net.packets.InvalidPacketDataException;
+import megamek.common.net.packets.Packet;
+import megamek.common.options.OptionsConstants;
+import megamek.common.units.Entity;
+import megamek.logging.MMLogger;
+import megamek.server.UnitOwnershipRules.OwnershipVerdict;
+import megamek.server.totalWarfare.TWGameManager;
+
+public class ServerLobbyHelper {
+    private static final MMLogger LOGGER = MMLogger.create(ServerLobbyHelper.class);
+
+    /**
+     * Returns true when the given new force (that is not part of the given game's forces) can be integrated into game's
+     * forces without error; i.e.: if the force's parent exists, or it is top-level, if it has no entities and no
+     * subForces, if the client sending it is the owner
+     */
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    static boolean isNewForceValid(Game game, Force force) {
+        return (force.isTopLevel() || game.getForces().contains(force.getParentId()))
+              && (force.getChildCount() == 0);
+    }
+
+    /**
+     * Writes a "Unit XX has been customized" message to the chat. The message is adapted to blind drop conditions.
+     */
+    public static String entityUpdateMessage(Entity entity, Game game) {
+        StringBuilder result = new StringBuilder();
+        if (game.getOptions().booleanOption(OptionsConstants.BASE_REAL_BLIND_DROP)) {
+            result.append("A Unit of ");
+            result.append(entity.getOwner().getName());
+            result.append(" has been customized.");
+
+        } else if (game.getOptions().booleanOption(OptionsConstants.BASE_BLIND_DROP)) {
+            result.append("Unit ");
+            if (!entity.getExternalIdAsString().equals("-1")) {
+                result.append('[').append(entity.getExternalIdAsString()).append("] ");
+            }
+            result.append(entity.getId());
+            result.append('(').append(entity.getOwner().getName()).append(')');
+            result.append(" has been customized.");
+
+        } else {
+            result.append("Unit ");
+            result.append(entity.getDisplayName());
+            result.append(" has been customized.");
+        }
+        return result.toString();
+    }
+
+    /**
+     * Disembarks and offloads the given entities (removing it from transports and removing transported units from it).
+     * Returns a set of entities that received changes. The set may be empty, but not null.
+     * <p>
+     * NOTE: This is a simplified unload that is only valid in the lobby!
+     */
+    public static HashSet<Entity> lobbyUnload(Game game, Collection<Entity> entities) {
+        HashSet<Entity> result = new HashSet<>();
+        for (Entity entity : entities) {
+            result.addAll(lobbyDisembark(game, entity));
+            for (Entity carriedUnit : entity.getLoadedUnits()) {
+                result.addAll(lobbyDisembark(game, carriedUnit));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Disembarks and offloads the given entity (removing it from transports and removing transported units from it)
+     * unless the transport or carried unit is also part of the given entities. Returns a set of entities that received
+     * changes. The set may be empty, but not null.
+     * <p>
+     * NOTE: This is a simplified unload that is only valid in the lobby!
+     */
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    static HashSet<Entity> lobbyUnloadOthers(Game game, Collection<Entity> entities) {
+        HashSet<Entity> result = new HashSet<>();
+        for (Entity entity : entities) {
+            result.addAll(lobbyDisembarkOthers(game, entity, entities));
+            for (Entity carriedUnit : entity.getLoadedUnits()) {
+                result.addAll(lobbyDisembarkOthers(game, carriedUnit, entities));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Have the given entity disembark if it is carried by another unit. Returns a set of entities that were modified.
+     * The set is empty if the entity was not loaded to a carrier.
+     * <p>
+     * NOTE: This is a simplified disembark that is only valid in the lobby!
+     */
+    private static HashSet<Entity> lobbyDisembark(Game game, Entity entity) {
+        return lobbyDisembarkOthers(game, entity, new ArrayList<>());
+    }
+
+    /**
+     * Have the given entity disembark if it is carried by another unit. Returns a set of entities that were modified.
+     * The set is empty if the entity was not loaded to a carrier.
+     * <p>
+     * NOTE: This is a simplified disembark that is only valid in the lobby!
+     */
+    private static HashSet<Entity> lobbyDisembarkOthers(Game game, Entity entity, Collection<Entity> entities) {
+        HashSet<Entity> result = new HashSet<>();
+
+        if (entity != null && entity.getTransportId() != Entity.NONE) {
+            Entity carrier = game.getEntity(entity.getTransportId());
+            if (carrier != null && !entities.contains(carrier)) {
+                carrier.unload(entity);
+                result.add(entity);
+                result.add(carrier);
+                entity.setTransportId(Entity.NONE);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Have the given entity disembark if it is carried by an enemy unit.
+     * <p>
+     * NOTE: This is a simplified disembark that is only valid in the lobby!
+     */
+    private static void lobbyDisembarkEnemy(Game game, Entity entity) {
+        if (entity.getTransportId() != Entity.NONE) {
+            Entity carrier = game.getEntity(entity.getTransportId());
+            if (carrier == null) {
+                entity.setTransportId(Entity.NONE);
+            } else if (carrier.getOwner().isEnemyOf(entity.getOwner())) {
+                carrier.unload(entity);
+                entity.setTransportId(Entity.NONE);
+            }
+        }
+    }
+
+    /**
+     * Performs a disconnect from C3 networks for the given entities. This is a simplified version that is only valid in
+     * the lobby. Returns a set of entities that received changes.
+     */
+    public static HashSet<Entity> performC3Disconnect(Game game, Collection<Entity> entities) {
+        HashSet<Entity> result = new HashSet<>();
+        // Disconnect the entity from networks
+        for (Entity entity : entities) {
+            if (entity.hasNhC3()) {
+                entity.setC3NetIdSelf();
+                result.add(entity);
+            } else if (entity.hasAnyC3System()) {
+                entity.setC3Master(null, true);
+                result.add(entity);
+            }
+        }
+        // Also disconnect all units connected *to* that entity
+        for (Entity entity : game.getEntitiesVector()) {
+            if (entities.contains(entity.getC3Master())) {
+                entity.setC3Master(null, true);
+                result.add(entity);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Creates a packet for an update for the given entities. Only valid in the lobby.
+     */
+    public static Packet createMultiEntityPacket(Collection<Entity> entities) {
+        return new Packet(PacketCommand.ENTITY_MULTI_UPDATE, entities);
+    }
+
+    /**
+     * Creates a packet detailing a force delete. Only valid in the lobby.
+     */
+    public static Packet createForcesDeletePacket(Collection<Integer> forces) {
+        return new Packet(PacketCommand.FORCE_DELETE, forces);
+    }
+
+    /**
+     * Handles a force parent packet, attaching the sent forces to a new parent or making the sent forces top-level.
+     * This method is intended for use in the lobby!
+     */
+    public static void receiveForceParent(
+          Packet packet, int connId, Game game, TWGameManager gameManager
+    ) throws InvalidPacketDataException {
+        var forceList = packet.getForceList(0);
+        int newParentId = packet.getIntValue(1);
+
+        var forces = game.getForces();
+        var changedForces = new HashSet<Force>();
+
+        if (newParentId == Force.NO_FORCE) {
+            forceList.forEach(f -> changedForces.addAll(forces.promoteForce(forces.getForce(f.getId()))));
+        } else {
+            if (!forces.contains(newParentId)) {
+                LOGGER.warn("Tried to attach forces to non-existing parent force ID {}", newParentId);
+                return;
+            }
+            Force newParent = forces.getForce(newParentId);
+            forceList.forEach(f -> changedForces.addAll(forces.attachForce(forces.getForce(f.getId()), newParent)));
+        }
+
+        if (!changedForces.isEmpty()) {
+            gameManager.send(createForceUpdatePacket(changedForces));
+        }
+    }
+
+    /**
+     * Handles a force assign full packet, changing the owner of forces and everything in them. This method is intended
+     * for use in the lobby!
+     */
+    public static void receiveEntitiesAssign(
+          Packet packet, int connId, Game game, TWGameManager gameManager
+    ) throws InvalidPacketDataException {
+        var entityList = packet.getEntityList(0);
+        int newOwnerId = packet.getIntValue(1);
+        Player newOwner = game.getPlayer(newOwnerId);
+
+        if (entityList.isEmpty() || newOwner == null) {
+            return;
+        }
+
+        // Get the local (server) entities
+        var serverEntities = new HashSet<Entity>();
+        entityList.stream().map(e -> game.getEntity(e.getId())).forEach(serverEntities::add);
+
+        // The owner arrives in the payload, so it is checked here rather than trusted (issue #8860). Each unit is
+        // judged on its own: a sender may own some of a mixed selection and not the rest.
+        Player sender = game.getPlayer(connId);
+        List<Entity> permitted = new ArrayList<>();
+        for (Entity entity : serverEntities) {
+            if (entity == null) {
+                continue;
+            }
+            OwnershipVerdict verdict = UnitOwnershipRules.verdictFor(sender, newOwner);
+            if (verdict.isAllowed() && !mayActFor(sender, entity.getOwner())) {
+                // Handing over someone else's unit is a different question from who may receive it.
+                verdict = OwnershipVerdict.NOT_PERMITTED;
+            }
+            UnitOwnershipRules.logDecision("reassign", verdict, sender, newOwner, entity.getShortNameRaw());
+            if (verdict.isAllowed()) {
+                permitted.add(entity);
+            } else {
+                gameManager.sendServerChat(
+                      UnitOwnershipRules.refusalMessage("reassign", sender, newOwner, entity.getShortNameRaw()));
+            }
+        }
+        if (permitted.isEmpty()) {
+            return;
+        }
+        for (Entity entity : permitted) {
+            entity.setOwner(newOwner);
+        }
+        game.getForces().correct();
+        correctLoading(game);
+        correctC3Connections(game);
+        gameManager.send(gameManager.createFullEntitiesPacket());
+    }
+
+    /**
+     * Handles a force assign full packet, changing the owner of forces and everything in them. This method is intended
+     * for use in the lobby!
+     */
+    /**
+     * Whether the sender may act for a unit's current owner: their own unit, one of their bots, or anything at all if
+     * they hold Gamemaster. Giving a unit away is a separate question from who may receive it, so both are checked.
+     *
+     * @param sender       the player on the sending connection, or {@code null}
+     * @param currentOwner the unit's owner before the change, or {@code null}
+     *
+     * @return {@code true} if the sender may hand this unit over
+     */
+    private static boolean mayActFor(@Nullable Player sender, @Nullable Player currentOwner) {
+        return UnitOwnershipRules.verdictFor(sender, currentOwner).isAllowed();
+    }
+
+    /**
+     * Whether the sender may act for every unit in a force. A force moves whole, so one unit they may not give is
+     * enough to refuse it.
+     *
+     * @param sender   the player on the sending connection, or {@code null}
+     * @param entities the units in the force
+     *
+     * @return {@code true} if every unit is the sender's to hand over
+     */
+    private static boolean mayActForAll(@Nullable Player sender, Collection<Entity> entities) {
+        for (Entity entity : entities) {
+            if (!mayActFor(sender, entity.getOwner())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static void receiveForceAssignFull(
+          Packet packet, int connId, Game game, TWGameManager gameManager
+    ) throws InvalidPacketDataException {
+        var forceList = packet.getForceList(0);
+        int newOwnerId = packet.getIntValue(1);
+        Player newOwner = game.getPlayer(newOwnerId);
+
+        if (forceList.isEmpty() || newOwner == null) {
+            return;
+        }
+
+        var forces = game.getForces();
+        // Get the local (server) forces
+        var serverForces = new HashSet<Force>();
+        forceList.stream().map(f -> forces.getForce(f.getId())).forEach(serverForces::add);
+        // Remove redundant forces (subForces of others in the list)
+        Set<Force> allSubForces = new HashSet<>();
+        serverForces.stream().map(forces::getFullSubForces).forEach(allSubForces::addAll);
+        serverForces.removeIf(allSubForces::contains);
+
+        Player forceSender = game.getPlayer(connId);
+        for (Force force : serverForces) {
+            Collection<Entity> entities = ForceAssignable.filterToEntityList(forces.getFullEntities(force));
+
+            // Same rule as a unit reassignment (issue #8860). A force moves whole or not at all, so if any unit in
+            // it is not the sender's to give, the force is refused rather than partly moved.
+            OwnershipVerdict verdict = UnitOwnershipRules.verdictFor(forceSender, newOwner);
+            if (verdict.isAllowed() && !mayActForAll(forceSender, entities)) {
+                verdict = OwnershipVerdict.NOT_PERMITTED;
+            }
+            UnitOwnershipRules.logDecision("reassign force", verdict, forceSender, newOwner, force.getName());
+            if (!verdict.isAllowed()) {
+                gameManager.sendServerChat(
+                      UnitOwnershipRules.refusalMessage("reassign force", forceSender, newOwner, force.getName()));
+                continue;
+            }
+
+            forces.assignFullForces(force, newOwner);
+            for (Entity entity : entities) {
+                entity.setOwner(newOwner);
+            }
+        }
+        forces.correct();
+        correctLoading(game);
+        correctC3Connections(game);
+        gameManager.send(gameManager.createFullEntitiesPacket());
+    }
+
+    /**
+     * Handles a force update packet, forwarding a client-side change that only affects forces, not entities: - rename -
+     * move subforce/entity up/down (this does not change the entity, only the force) - owner change of only the force
+     * (not the entities, only within a team) This method is intended for use in the lobby!
+     */
+    public static void receiveForceUpdate(
+          Packet packet, int connId, Game game, TWGameManager gameManager
+    ) throws InvalidPacketDataException {
+        var forceList = packet.getForceList(0);
+
+        // Check if the updated Forces are valid
+        Forces forcesClone = game.getForces().clone();
+        for (Force force : forceList) {
+            forcesClone.replace(force.getId(), force);
+        }
+        if (forcesClone.isValid()) {
+            game.setForces(forcesClone);
+            gameManager.send(createForceUpdatePacket(forceList));
+        } else {
+            LOGGER.warn("Invalid forces update received.");
+            gameManager.send(gameManager.createFullEntitiesPacket());
+        }
+    }
+
+    /**
+     * Handles a team change, updating units and forces as necessary. This method is intended for use in the lobby!
+     */
+    public static void receiveLobbyTeamChange(
+          Packet packet, int connId, Game game, TWGameManager gameManager
+    ) throws InvalidPacketDataException {
+        var players = packet.getPlayerVector(0);
+        var newTeam = packet.getIntValue(1);
+
+        // Collect server-side player objects
+        Set<Player> serverPlayers = new HashSet<>();
+        players.stream().map(p -> game.getPlayer(p.getId())).forEach(serverPlayers::add);
+
+        // Check parameters and if there's an actual change to a player
+        serverPlayers.removeIf(p -> p == null || p.getTeam() == newTeam);
+        if (serverPlayers.isEmpty() || newTeam < 0 || newTeam > 5) {
+            return;
+        }
+
+        // First, change all teams, then correct all connections (load, C3, force)
+        for (Player player : serverPlayers) {
+            player.setTeam(newTeam);
+        }
+        Forces forces = game.getForces();
+        forces.correct();
+        correctLoading(game);
+        correctC3Connections(game);
+
+        gameManager.send(gameManager.createFullEntitiesPacket());
+        // team changes alter who may see whose victory hex designations - re-send everyone so each
+        // client gets the data its new relations allow
+        gameManager.transmitAllPlayerUpdates();
+    }
+
+    /**
+     * For all game units, disembarks from carriers and offloads carried units if they are enemies.
+     * <p>
+     * NOTE: This is a simplified unload that is only valid in the lobby!
+     */
+    public static void correctLoading(Game game) {
+        for (Entity entity : game.getEntitiesVector()) {
+            lobbyDisembarkEnemy(game, entity);
+            for (Entity carriedUnit : entity.getLoadedUnits()) {
+                lobbyDisembarkEnemy(game, carriedUnit);
+            }
+        }
+        correctTowLinks(game);
+    }
+
+    /**
+     * For all game units, unhitches trailers whose train has ended up split between opposing players.
+     * <p>
+     * This is the tow counterpart of the disembarking done above. Reassigning one unit of a train to an enemy would
+     * otherwise leave the two hitched together, moving as one train across opposing sides.
+     * </p>
+     * <p>
+     * NOTE: This is intended for use in the lobby phase!
+     * </p>
+     */
+    public static void correctTowLinks(Game game) {
+        // Copy the list: disconnecting a trailer drops every trailer behind it, changing the train as we walk it.
+        for (Entity entity : new ArrayList<>(game.getEntitiesVector())) {
+            if (entity.getTractor() == Entity.NONE) {
+                continue;
+            }
+
+            Entity tractor = game.getEntity(entity.getTractor());
+            if ((tractor != null) && tractor.getOwner().isEnemyOf(entity.getOwner())) {
+                LOGGER.info("[Train] {} and {} are no longer on the same side; unhitching",
+                      tractor.getDisplayName(), entity.getDisplayName());
+                tractor.disconnectUnit(entity.getId());
+            }
+        }
+    }
+
+    /**
+     * For all game units, disconnects from enemy C3 masters / networks
+     * <p>
+     * NOTE: This is intended for use in the lobby phase!
+     */
+    public static void correctC3Connections(Game game) {
+        for (Entity entity : game.getEntitiesVector()) {
+            if (entity.hasNhC3()) {
+                String net = entity.getC3NetId();
+                try {
+                    var id = Integer.parseInt(net.substring(net.indexOf(".") + 1));
+                    var netUnit = game.getEntity(id);
+                    if (netUnit != null && netUnit.getOwner().isEnemyOf(entity.getOwner())) {
+                        entity.setC3NetIdSelf();
+                    }
+                } catch (Exception ignored) {
+                }
+            } else if (entity.hasAnyC3System()) {
+                if ((entity.getC3Master() != null)
+                      && entity.getC3Master().getOwner().isEnemyOf(entity.getOwner())) {
+                    entity.setC3Master(null, true);
+                }
+            }
+        }
+    }
+
+    /**
+     * Handles an add entity to force / remove from force packet, attaching the sent entities to a force or removing
+     * them from any force. This method is intended for use in the lobby!
+     */
+    public static void receiveAddEntitiesToForce(
+          Packet packet, int connId, Game game, TWGameManager gameManager
+    ) throws InvalidPacketDataException {
+        var entityList = packet.getEntityList(0);
+        var forceId = packet.getIntValue(1);
+        // Get the local (server) entities
+        List<Entity> entities = entityList.stream().map(e -> game.getEntity(e.getId())).collect(toList());
+        var forces = game.getForces();
+
+        var changedEntities = new HashSet<Entity>();
+        var changedForces = new HashSet<Force>();
+        // Check if the entities are team members of the force, unless the entities are
+        // removed from forces
+        if (forceId != Force.NO_FORCE) {
+            var forceOwner = forces.getOwner(forceId);
+            if (entities.stream().anyMatch(e -> e.getOwner().isEnemyOf(forceOwner))) {
+                LOGGER.warn("Tried to add entities to an enemy force.");
+                return;
+            }
+            for (Entity entity : entities) {
+                List<Force> result = forces.addEntity(entity, forceId);
+                if (!result.isEmpty()) {
+                    changedForces.addAll(result);
+                    changedEntities.add(entity);
+                }
+            }
+        } else {
+            changedForces.addAll(game.getForces().removeEntityFromForces(entities));
+            changedEntities.addAll(entities);
+        }
+        gameManager.send(createForceUpdatePacket(changedForces, changedEntities));
+    }
+
+    /**
+     * Adds a force with the info from the client. Only valid during the lobby phase.
+     */
+    public static void receiveForceAdd(
+          Packet packet, int connId, Game game, TWGameManager gameManager
+    ) throws InvalidPacketDataException {
+        var force = packet.getForce(0);
+        var entities = packet.getEntityList(1);
+
+        if (force == null) {
+            return;
+        }
+
+        int newId;
+        if (force.isTopLevel()) {
+            newId = game.getForces().addTopLevelForce(force, game.getPlayer(force.getOwnerId()));
+        } else {
+            Force parent = game.getForces().getForce(force.getParentId());
+            newId = game.getForces().addSubForce(force, parent);
+        }
+        for (var entity : entities) {
+            game.getForces().addEntity(game.getEntity(entity.getId()), newId);
+        }
+        gameManager.send(gameManager.createFullEntitiesPacket());
+    }
+
+    /**
+     * Creates a packet detailing a force update. Force updates must contain all affected forces and all affected
+     * entities.
+     */
+    static Packet createForceUpdatePacket(Collection<Force> changedForces) {
+        return createForceUpdatePacket(changedForces, new HashSet<>());
+    }
+
+    /**
+     * Creates a packet detailing a force update. Force updates must contain all affected forces and all affected
+     * entities. Entities are only affected if their forceId changed.
+     */
+    static Packet createForceUpdatePacket(Collection<Force> changedForces, Collection<Entity> entities) {
+        return new Packet(PacketCommand.FORCE_UPDATE, changedForces, entities);
+    }
+
+    /**
+     * A force is editable to the sender of a command if any forces in its force chain (this includes the force itself)
+     * is owned by the sender. This allows editing forces of other players if they are a subforce of one's own force.
+     * See also LobbyActions.isEditable(Force)
+     */
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    static boolean isEditable(Force force, Game game, Player sender) {
+        List<Force> chain = game.getForces().forceChain(force);
+        return chain.stream().map(f -> game.getForces().getOwner(f)).anyMatch(p -> p.equals(sender));
+    }
+}

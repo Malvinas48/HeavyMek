@@ -1,0 +1,2040 @@
+/*
+ * Copyright (c) 2005 - Ben Mazur (bmazur@sev.org)
+ * Copyright (C) 2008-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+package megamek.client.ui.clientGUI;
+
+import java.awt.Component;
+import java.awt.event.ActionEvent;
+import java.awt.event.InputEvent;
+import java.awt.event.MouseEvent;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+import java.util.StringTokenizer;
+import java.util.Vector;
+import java.util.function.BiConsumer;
+import javax.swing.JCheckBoxMenuItem;
+import javax.swing.JComponent;
+import javax.swing.JMenu;
+import javax.swing.JMenuItem;
+import javax.swing.JPopupMenu;
+import javax.swing.JSeparator;
+import javax.swing.UIManager;
+
+import jakarta.annotation.Nullable;
+import megamek.client.Client;
+import megamek.client.bot.princess.ArtilleryCommandAndControl.ArtilleryOrder;
+import megamek.client.bot.princess.ArtilleryCommandAndControl.SpecialAmmo;
+import megamek.client.bot.princess.ChatCommands;
+import megamek.client.event.BoardViewEvent;
+import megamek.client.ui.Messages;
+import megamek.client.ui.clientGUI.boardview.BoardView;
+import megamek.client.ui.clientGUI.boardview.overlay.ToastLevel;
+import megamek.client.ui.dialogs.BotCommands.BotMoveOrderDialog;
+import megamek.client.ui.dialogs.BotCommands.BotOrderFacingDialog;
+import megamek.client.ui.dialogs.BotCommands.BotOrdersMenuBuilder;
+import megamek.client.ui.dialogs.BotCommands.BotWaypointMenuBuilder;
+import megamek.client.ui.dialogs.BuildingEditDialog;
+import megamek.client.ui.dialogs.HexEditDialog;
+import megamek.client.ui.dialogs.NoteDialog;
+import megamek.client.ui.dialogs.TurretFacingDialog;
+import megamek.client.ui.dialogs.UnitEditorDialog;
+import megamek.client.ui.entityreadout.LiveReadoutDialog;
+import megamek.client.ui.enums.DialogResult;
+import megamek.client.ui.panels.phaseDisplay.FiringDisplay;
+import megamek.client.ui.panels.phaseDisplay.MovementDisplay;
+import megamek.client.ui.panels.phaseDisplay.PhysicalDisplay;
+import megamek.client.ui.panels.phaseDisplay.PreEndDeclarationsDisplay;
+import megamek.client.ui.panels.phaseDisplay.TargetingPhaseDisplay;
+import megamek.client.ui.panels.phaseDisplay.VictoryHexPropertiesPane;
+import megamek.client.ui.panels.phaseDisplay.commands.MoveCommand;
+import megamek.common.Hex;
+import megamek.common.HexTarget;
+import megamek.common.Player;
+import megamek.common.SpecialHexDisplay;
+import megamek.common.ToHitData;
+import megamek.common.actions.BAVibroClawAttackAction;
+import megamek.common.actions.BreakGrappleAttackAction;
+import megamek.common.actions.GrappleAttackAction;
+import megamek.common.actions.WeaponAttackAction;
+import megamek.common.board.Board;
+import megamek.common.board.BoardLocation;
+import megamek.common.board.Coords;
+import megamek.common.comparators.WeaponComparatorDamage;
+import megamek.common.compute.TurretFacing;
+import megamek.common.equipment.*;
+import megamek.common.game.Game;
+import megamek.common.options.OptionsConstants;
+import megamek.common.rolls.TargetRoll;
+import megamek.common.units.*;
+import megamek.logging.MMLogger;
+
+/**
+ * Context menu for the board.
+ */
+public class MapMenu extends JPopupMenu {
+    private final static MMLogger logger = MMLogger.create(MapMenu.class);
+
+    private final Coords coords;
+    Game game;
+    JComponent currentPanel;
+    private final Board board;
+    Client client;
+    ClientGUI gui;
+    Entity selectedEntity;
+    Entity myEntity;
+    Targetable myTarget = null;
+    private final boolean hasMenu;
+    private final BoardLocation boardLocation;
+
+    public MapMenu(Coords coords, int boardId, JComponent panel, ClientGUI gui) {
+        this.coords = coords;
+        currentPanel = panel;
+        this.gui = gui;
+        client = gui.getClient();
+        game = client.getGame();
+        board = game.getBoard(boardId);
+        selectedEntity = myEntity = gui.getDisplayedUnit();
+        boardLocation = BoardLocation.of(coords, boardId);
+
+        hasMenu = createMenu();
+        // make popups not consume mouse events outside them
+        // so board dragging can start correctly when this menu is open
+        UIManager.put("PopupMenu.consumeEventOnClose", false);
+    }
+
+    private boolean canSelectEntities() {
+        return client.isMyTurn() &&
+              ((currentPanel instanceof FiringDisplay) ||
+                    (currentPanel instanceof PhysicalDisplay) ||
+                    (currentPanel instanceof MovementDisplay) ||
+                    (currentPanel instanceof TargetingPhaseDisplay));
+    }
+
+    private boolean canTargetEntities() {
+        return client.isMyTurn() &&
+              ((currentPanel instanceof FiringDisplay) ||
+                    (currentPanel instanceof PhysicalDisplay) ||
+                    (currentPanel instanceof TargetingPhaseDisplay));
+    }
+
+    private boolean createMenu() {
+        removeAll();
+
+        addIfNotEmpty(createSelectMenu());
+        addIfNotEmpty(createViewMenu());
+
+        if (client.isMyTurn() && (myEntity != null)) {
+            selectTarget();
+            addIfNotEmpty(createTargetMenu());
+            // Don't show some menus for a unit that is not on this board
+            if (boardLocation.isOn(myEntity.getBoardId())) {
+
+                if (currentPanel instanceof MovementDisplay) {
+                    if (getComponentCount() > 0) {
+                        addSeparator();
+                    }
+                    if (myEntity.getPosition() != null) {
+                        addIfNotEmpty(createMovementMenu(myEntity.getPosition().equals(coords)));
+                    } else {
+                        addIfNotEmpty(createMovementMenu(false));
+                    }
+                    addIfNotEmpty(createTurnMenu());
+                    addIfNotEmpty(createStandMenu());
+                    addIfNotEmpty(createConvertMenu());
+                    addIfNotEmpty(createPhysicalMenu(true));
+                    removeSeparatorIfLast();
+
+                } else if ((currentPanel instanceof FiringDisplay firingDisplay)) {
+                    if (getComponentCount() > 0) {
+                        addSeparator();
+                    }
+                    addIfNotEmpty(createWeaponsFireMenu(firingDisplay));
+                    addIfNotEmpty(createModeMenu());
+                    addIfNotEmpty(createTorsoTwistMenu());
+                    addIfNotEmpty(createRotateTurretMenu());
+                    removeSeparatorIfLast();
+
+                } else if ((currentPanel instanceof PhysicalDisplay)) {
+                    addIfNotEmptyWithSeparator(createPhysicalMenu(false));
+
+                } else if (currentPanel instanceof TargetingPhaseDisplay) {
+                    if (getComponentCount() > 0) {
+                        addSeparator();
+                    }
+                    // Turrets and Directional Torso Mounts can also be aimed during the targeting (TAG) phase
+                    // (issue #6518); the facing change is sent immediately, so it applies in this phase too.
+                    addIfNotEmpty(createRotateTurretMenu());
+                    removeSeparatorIfLast();
+                }
+            }
+        }
+
+        addIfNotEmpty(touchOffExplosivesMenu());
+        addIfNotEmptyWithSeparator(createSpecialHexDisplayMenu());
+        addWaypointMenus();
+        addIfNotEmptyWithSeparator(createPleaToRoyaltyMenu());
+        addIfNotEmptyWithSeparator(createGameMasterMenu());
+        return getComponentCount() > 0;
+    }
+
+    private void addIfNotEmpty(JMenu subMenu) {
+        if (subMenu.getItemCount() > 0) {
+            add(subMenu);
+        }
+    }
+
+    private void addIfNotEmptyWithSeparator(JMenu subMenu) {
+        if (subMenu.getItemCount() > 0) {
+            if (getComponentCount() > 0) {
+                addSeparator();
+            }
+            add(subMenu);
+        }
+    }
+
+    /**
+     * Removes the last component of this menu, if it is a JSeparator.
+     */
+    private void removeSeparatorIfLast() {
+        try {
+            if (getComponent(getComponentCount() - 1) instanceof JSeparator) {
+                remove(getComponentCount() - 1);
+            }
+        } catch (Exception e) {
+            // This is only for GUI beauty, it should not ever fail
+        }
+    }
+
+    private JMenuItem targetMenuItem(Targetable t) {
+        JMenuItem item = new JMenuItem(Messages.getString("ClientGUI.targetMenuItem") + t.getDisplayName());
+
+        String targetCode = getTargetCode(t);
+
+        item.setActionCommand(targetCode);
+        item.addActionListener(evt -> {
+            myTarget = decodeTargetInfo(evt.getActionCommand());
+            if (currentPanel instanceof FiringDisplay) {
+                ((FiringDisplay) currentPanel).target(myTarget);
+            } else if (currentPanel instanceof PhysicalDisplay) {
+                ((PhysicalDisplay) currentPanel).target(myTarget);
+            } else if (currentPanel instanceof TargetingPhaseDisplay) {
+                ((TargetingPhaseDisplay) currentPanel).target(myTarget);
+            }
+        });
+        return item;
+    }
+
+    private static String getTargetCode(Targetable t) {
+        return switch (t) {
+            case Entity ignored -> "E|" + t.getId();
+            case BuildingTarget ignored ->
+                  "B|" + t.getPosition().getX() + "|" + t.getPosition().getY() + "|" + t.getTargetType();
+            case MinefieldTarget ignored -> "M|" + t.getPosition().getX() + "|" + t.getPosition().getY();
+            default -> "H|" + t.getPosition().getX() + "|" + t.getPosition().getY() + "|" + t.getTargetType();
+        };
+    }
+
+    private @Nullable JMenuItem createChargeMenuItem() {
+        if (!client.getGame().getEntities(coords).hasNext()) {
+            return null;
+        }
+
+        JMenuItem item = new JMenuItem(Messages.getString("MovementDisplay.butCharge"));
+        item.setActionCommand(MoveCommand.MOVE_CHARGE.getCmd());
+        item.addActionListener(this::plotCourse);
+        return item;
+    }
+
+    private @Nullable JMenuItem createDFAJMenuItem() {
+        if (!client.getGame().getEntities(coords).hasNext()) {
+            return null;
+        }
+
+        JMenuItem item = new JMenuItem(Messages.getString("MovementDisplay.butDfa"));
+        item.setActionCommand(MoveCommand.MOVE_DFA.getCmd());
+        item.addActionListener(this::plotCourse);
+        return item;
+    }
+
+    private JMenuItem selectJMenuItem(Entity en) {
+        JMenuItem item = new JMenuItem(Messages.getString("ClientGUI.selectMenuItem") + en.getDisplayName());
+
+        item.setActionCommand(Integer.toString(en.getId()));
+        item.addActionListener(evt -> {
+            try {
+                selectedEntity = game.getEntity(Integer.parseInt(evt.getActionCommand()));
+                if (selectedEntity != null) {
+                    if (currentPanel instanceof MovementDisplay) {
+                        ((MovementDisplay) currentPanel).selectEntity(selectedEntity.getId());
+                    } else if (currentPanel instanceof FiringDisplay) {
+                        ((FiringDisplay) currentPanel).selectEntity(selectedEntity.getId());
+                    } else if (currentPanel instanceof PhysicalDisplay) {
+                        ((PhysicalDisplay) currentPanel).selectEntity(selectedEntity.getId());
+                    } else if (currentPanel instanceof PreEndDeclarationsDisplay preEndDisplay) {
+                        preEndDisplay.selectEntity(selectedEntity.getId());
+                    }
+                }
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+
+        return item;
+    }
+
+    private JMenuItem viewJMenuItem(Entity en) {
+        JMenuItem item = new JMenuItem(Messages.getString("ClientGUI.viewMenuItem") + en.getDisplayName());
+
+        item.setActionCommand(Integer.toString(en.getId()));
+        item.addActionListener(evt -> {
+            try {
+                selectedEntity = game.getEntity(Integer.parseInt(evt.getActionCommand()));
+                GUIPreferences.getInstance().setUnitDisplayEnabled(true);
+                gui.getUnitDisplay().displayEntity(selectedEntity);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+
+        return item;
+    }
+
+    private JMenuItem viewReadoutJMenuItem(Entity en) {
+        JMenuItem item = new JMenuItem(Messages.getString("ClientGUI.viewReadoutMenuItem") + en.getDisplayName());
+
+        item.setActionCommand(Integer.toString(en.getId()));
+        item.addActionListener(evt -> {
+            try {
+                selectedEntity = game.getEntity(Integer.parseInt(evt.getActionCommand()));
+                if (selectedEntity != null) {
+                    new LiveReadoutDialog(gui.getFrame(), game, selectedEntity.getId()).setVisible(true);
+                }
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+
+        return item;
+    }
+
+    private JMenu touchOffExplosivesMenu() {
+        JMenu menu = new JMenu(Messages.getString("MapMenu.touchOffExplosives"));
+
+        IBuilding bldg = board.getBuildingAt(coords);
+        if ((bldg != null)) {
+            for (final DemolitionCharge charge : bldg.getDemolitionCharges()) {
+                if (charge.playerId == client.getLocalPlayer().getId() && coords.equals(charge.pos)) {
+                    JMenuItem item = new JMenuItem(
+                          Messages.getString("MapMenu.touchOffExplosives.damage", charge.damage));
+                    item.addActionListener(e -> {
+                        client.sendExplodeBuilding(charge);
+                        gui.addToast(ToastLevel.SUCCESS,
+                              Messages.getString("MapMenu.touchOffExplosives.toast", charge.damage));
+                    });
+                    menu.add(item);
+                }
+            }
+        }
+        return menu;
+    }
+
+    /**
+     * @return A submenu for SpecialHexDisplays
+     */
+    private JMenu createSpecialHexDisplayMenu() {
+        JMenu menu = new JMenu("Special Hex Display");
+
+        SpecialHexDisplay note = game.getBoard(boardLocation.boardId())
+              .getSpecialHexDisplay(coords)
+              .stream()
+              .filter(shd -> shd.getType() == SpecialHexDisplay.Type.PLAYER_NOTE)
+              .filter(shd -> shd.getOwner().equals(client.getLocalPlayer()))
+              .findFirst().orElse(null);
+
+        final SpecialHexDisplay finalNote = Objects.requireNonNullElseGet(note,
+              () -> new SpecialHexDisplay(SpecialHexDisplay.Type.PLAYER_NOTE,
+                    SpecialHexDisplay.NO_ROUND,
+                    client.getLocalPlayer(),
+                    ""));
+        JMenuItem item = new JMenuItem(Messages.getString("NoteDialog.action"));
+        item.addActionListener(evt -> {
+            NoteDialog nd = new NoteDialog(gui.frame, finalNote);
+            gui.getBoardView().setShouldIgnoreKeys(true);
+            nd.setVisible(true);
+            gui.getBoardView().setShouldIgnoreKeys(false);
+            if (nd.isAccepted()) {
+                client.sendSpecialHexDisplayAppend(coords, boardLocation.boardId(), finalNote);
+            }
+        });
+        menu.add(item);
+
+        if (note != null) {
+            item = new JMenuItem(Messages.getString("NoteDialog.delete"));
+            item.addActionListener(e ->
+                  client.sendSpecialHexDisplayDelete(coords, boardLocation.boardId(), finalNote));
+        }
+        menu.add(item);
+
+        return menu;
+    }
+
+    /**
+     * Adds a menu for each bot route on the player's side with a waypoint on this hex, to change the waypoint's facing
+     * and hold, remove it, or open the route in the Move Order editor.
+     */
+    private void addWaypointMenus() {
+        boolean isFirst = true;
+        for (JMenu waypointMenu : BotWaypointMenuBuilder.menusFor(client, coords, boardLocation.boardId(),
+              this::openBotRouteEditor, (botPlayer, orderText) -> gui.addToast(ToastLevel.SUCCESS,
+                    Messages.getString("BotCommandPanel.toast.orderSent", botPlayer.getName(), orderText)))) {
+            if (isFirst && (getComponentCount() > 0)) {
+                addSeparator();
+            }
+            add(waypointMenu);
+            isFirst = false;
+        }
+    }
+
+    /**
+     * Opens the Move Order editor for the units following a route, on this board.
+     */
+    private void openBotRouteEditor(Player botPlayer, BotOrdersMenuBuilder.OrderGroup group) {
+        if (!(gui.getBoardView(boardLocation.boardId()) instanceof BoardView boardView)) {
+            return;
+        }
+        BotOrdersMenuBuilder unitsSource = new BotOrdersMenuBuilder(client, (orderDescription, singleHex,
+              onPicked) -> {}, (orderedBot, orderText) -> {});
+        new BotMoveOrderDialog(gui, boardView, botPlayer, group, () -> unitsSource.unitsByLance(botPlayer),
+              (orderedBot, orderText) -> gui.addToast(ToastLevel.SUCCESS,
+                    Messages.getString("BotCommandPanel.toast.orderSent", orderedBot.getName(), orderText)))
+              .setVisible(true);
+    }
+
+    /**
+     * Creates various menus related to giving commands to allied bots
+     *
+     * @return JMenu
+     */
+    private JMenu createPleaToRoyaltyMenu() {
+        JMenu menu = new JMenu(Messages.getString("Bot.commands.title"));
+        var isGM = isGameMasterEnabled();
+        for (var player : client.getGame().getPlayersList()) {
+            var isEnemy = player.isEnemyOf(client.getLocalPlayer());
+            var playerIsBot = player.isBot();
+            if (playerIsBot && (!isEnemy || isGM)) {
+                menu.add(createBotCommands(player));
+            }
+        }
+        return menu;
+    }
+
+    private JMenu createBotCommands(Player bot) {
+        JMenu menu = new JMenu(bot.getName() + " (" + bot.getTeamName() + ")");
+
+        JMenu prioritizeTargetUnitMenu = new JMenu(Messages.getString("Bot.commands.priority"));
+        JMenu ignoreTargetMenu = new JMenu(Messages.getString("Bot.commands.ignore"));
+        JMenu behaviorMenu = createBehaviorMenu(bot);
+
+        // the same orders as the Bot Commands panel's Orders button, with this hex as the route
+        JMenu ordersMenu = new JMenu(Messages.getString("BotCommandPanel.Orders.title"));
+        new BotOrdersMenuBuilder(client, (orderDescription, singleHex, onPicked) -> onPicked.accept(
+              coords.getBoardNum()), (botPlayer, orderText) -> gui.addToast(ToastLevel.SUCCESS,
+              Messages.getString("BotCommandPanel.toast.orderSent", botPlayer.getName(), orderText)))
+              .withFacingChooser(this::chooseBotOrderFacings)
+              .populate(ordersMenu, bot, coords);
+        if (ordersMenu.getItemCount() > 0) {
+            menu.add(ordersMenu);
+        }
+
+        JMenu targetHexMenu = createTargetHexMenuItem(bot);
+        menu.add(targetHexMenu);
+        if (botHasArtillery(bot)) {
+            menu.add(createArtilleryMenu(bot));
+        }
+        for (Entity entity : client.getGame().getEntitiesVector(coords)) {
+            prioritizeTargetUnitMenu.add(createPrioritizeTargetUnitMenu(bot, entity));
+            ignoreTargetMenu.add(createIgnoreTargetUnitMenu(bot, entity));
+        }
+
+        if (prioritizeTargetUnitMenu.getItemCount() > 0) {
+            menu.add(prioritizeTargetUnitMenu);
+        }
+
+        if (ignoreTargetMenu.getItemCount() > 0) {
+            menu.add(ignoreTargetMenu);
+        }
+
+        menu.addSeparator();
+        menu.add(behaviorMenu);
+        return menu;
+    }
+
+    JMenu createBehaviorMenu(Player bot) {
+        JMenu menu = new JMenu(Messages.getString("Bot.commands.behavior"));
+        menu.add(createCautionMenu(bot));
+        menu.add(createAvoidMenu(bot));
+        menu.add(createAggressionMenu(bot));
+        menu.add(createMutualSupportMenu(bot));
+        menu.add(createBraveryMenu(bot));
+        return menu;
+    }
+
+    /**
+     * Creates a menu with "+" and "-" items that increase or decrease one of the bot's behavior indexes through the
+     * given chat command.
+     *
+     * @param bot         The bot player to send the command to
+     * @param messageKey  The resource key for the menu title
+     * @param chatCommand The behavior index chat command to send
+     *
+     * @return The created menu
+     */
+    private JMenu createBehaviorAdjustmentMenu(Player bot, String messageKey, ChatCommands chatCommand) {
+        JMenu menu = new JMenu(Messages.getString(messageKey));
+        JMenuItem item = new JMenuItem("+");
+        item.addActionListener(evt ->
+              client.sendChat(String.format("%s: %s : +", bot.getName(), chatCommand.getCommand())));
+        menu.add(item);
+        item = new JMenuItem("-");
+        item.addActionListener(evt ->
+              client.sendChat(String.format("%s: %s : -", bot.getName(), chatCommand.getCommand())));
+        menu.add(item);
+        return menu;
+    }
+
+    JMenu createMutualSupportMenu(Player bot) {
+        return createBehaviorAdjustmentMenu(bot, "Bot.commands.mutualSupport", ChatCommands.MUTUAL_SUPPORT);
+    }
+
+    JMenu createBraveryMenu(Player bot) {
+        return createBehaviorAdjustmentMenu(bot, "Bot.commands.bravery", ChatCommands.BRAVERY);
+    }
+
+    JMenu createAggressionMenu(Player bot) {
+        return createBehaviorAdjustmentMenu(bot, "Bot.commands.aggression", ChatCommands.AGGRESSION);
+    }
+
+    JMenu createAvoidMenu(Player bot) {
+        return createBehaviorAdjustmentMenu(bot, "Bot.commands.avoid", ChatCommands.AVOID);
+    }
+
+    JMenu createCautionMenu(Player bot) {
+        return createBehaviorAdjustmentMenu(bot, "Bot.commands.caution", ChatCommands.CAUTION);
+    }
+
+    /**
+     * Opens the facing dialog for a bot order, showing the first unit of the group.
+     */
+    private void chooseBotOrderFacings(BotOrdersMenuBuilder.OrderGroup group, int facingWhileMoving,
+          int facingWhenStopped, BiConsumer<Integer, Integer> onChosen) {
+        Entity previewUnit = client.getGame().getEntity(group.unitIds().get(0));
+        if (previewUnit == null) {
+            return;
+        }
+        BotOrderFacingDialog dialog = new BotOrderFacingDialog(gui.getFrame(), gui, previewUnit, facingWhileMoving,
+              facingWhenStopped);
+        if (dialog.showDialog() == DialogResult.CONFIRMED) {
+            onChosen.accept(dialog.getFacingWhileMoving(), dialog.getFacingWhenStopped());
+        }
+    }
+
+    JMenuItem createIgnoreTargetUnitMenu(Player bot, Entity entity) {
+        JMenuItem item = new JMenuItem(entity.getDisplayName());
+        item.addActionListener(evt -> client.sendChat(String.format("%s: ig : %d", bot.getName(), entity.getId())));
+        return item;
+    }
+
+    JMenuItem createPrioritizeTargetUnitMenu(Player bot, Entity entity) {
+        JMenuItem item = new JMenuItem(entity.getDisplayName());
+        item.addActionListener(evt -> client.sendChat(String.format("%s: pr : %d", bot.getName(), entity.getId())));
+        return item;
+    }
+
+    JMenu createTargetHexMenuItem(Player bot) {
+        JMenu targetHexMenu = new JMenu(Messages.getString("Bot.commands.targetHex"));
+        JMenuItem item = new JMenuItem(Messages.getString("Bot.commands.targetHex.addHex",
+              coords.toFriendlyString()));
+        item.addActionListener(evt -> client.sendChat(String.format("%s: %s : %s",
+              bot.getName(),
+              ChatCommands.TARGET.getCommand(),
+              coords.hexCode(board))));
+        targetHexMenu.add(item);
+        return targetHexMenu;
+    }
+
+    /**
+     * @param bot The bot player
+     *
+     * @return {@code true} if the bot owns at least one unit with an artillery weapon, so the artillery orders menu is
+     *       worth offering (a bot with no artillery would otherwise get an empty, useless menu)
+     */
+    private boolean botHasArtillery(Player bot) {
+        for (Entity entity : client.getGame().getPlayerEntities(bot, false)) {
+            if (entity.hasArtillery()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Creates the artillery orders menu for the given bot: fire missions (barrage/volley/single shot) at the clicked
+     * hex with a choice of ammo, plus halting and resuming automatic artillery fire.
+     *
+     * @param bot The bot player to send the orders to
+     *
+     * @return The created menu
+     */
+    JMenu createArtilleryMenu(Player bot) {
+        JMenu menu = new JMenu(Messages.getString("Bot.commands.artillery"));
+        menu.add(createArtilleryFireMissionMenu(bot, "Bot.commands.artillery.barrage", ArtilleryOrder.BARRAGE));
+        menu.add(createArtilleryFireMissionMenu(bot, "Bot.commands.artillery.volley", ArtilleryOrder.VOLLEY));
+        menu.add(createArtilleryFireMissionMenu(bot, "Bot.commands.artillery.single", ArtilleryOrder.SINGLE));
+        menu.addSeparator();
+        JMenuItem halt = new JMenuItem(Messages.getString("Bot.commands.artillery.halt"));
+        halt.addActionListener(evt -> sendArtilleryOrder(bot, ArtilleryOrder.HALT, SpecialAmmo.STANDARD, ""));
+        menu.add(halt);
+        JMenuItem auto = new JMenuItem(Messages.getString("Bot.commands.artillery.auto"));
+        auto.addActionListener(evt -> sendArtilleryOrder(bot, ArtilleryOrder.AUTO, SpecialAmmo.STANDARD, ""));
+        menu.add(auto);
+        return menu;
+    }
+
+    /**
+     * Creates a fire mission menu for the given artillery order at the clicked hex, with one entry per ammo type.
+     *
+     * @param bot        The bot player to send the order to
+     * @param messageKey The resource key for the menu title (formatted with the clicked hex)
+     * @param order      The artillery order to issue
+     *
+     * @return The created menu
+     */
+    private JMenu createArtilleryFireMissionMenu(Player bot, String messageKey, ArtilleryOrder order) {
+        JMenu menu = new JMenu(Messages.getString(messageKey, coords.toFriendlyString()));
+        for (SpecialAmmo ammo : SpecialAmmo.values()) {
+            JMenuItem item = new JMenuItem(Messages.getString("Bot.commands.artillery.ammo." + ammo.name()));
+            item.addActionListener(evt -> sendArtilleryOrder(bot, order, ammo, coords.hexCode(board)));
+            menu.add(item);
+        }
+        return menu;
+    }
+
+    /**
+     * Sends an artillery order chat command to the given bot and shows a confirmation toast.
+     *
+     * @param bot     The bot player to send the order to
+     * @param order   The artillery order to issue
+     * @param ammo    The special ammo to use
+     * @param targets Dash-separated target hex numbers, or an empty string for orders without targets
+     */
+    private void sendArtilleryOrder(Player bot, ArtilleryOrder order, SpecialAmmo ammo, String targets) {
+        // halt/auto take no ammo or targets, so send just the order to keep the chat echo readable
+        String arguments = targets.isBlank()
+              ? order.name()
+              : order.name() + " " + ammo.name() + " " + targets;
+        client.sendChat(String.format("%s: %s : %s",
+              bot.getName(), ChatCommands.ARTILLERY.getCommand(), arguments));
+        String orderText = targets.isBlank()
+              ? Messages.getString("Bot.commands.artillery.toast.order", order.name())
+              : Messages.getString("BotCommandPanel.toast.artillery", order.name(), targets);
+        gui.addToast(ToastLevel.SUCCESS,
+              Messages.getString("BotCommandPanel.toast.orderSent", bot.getName(), orderText));
+    }
+
+    /**
+     * Whether the gamemaster tools are offered: the player must hold the role, and the game must allow a gamemaster
+     * at all. The host controls that through the Allow Game Master game option; turning it off strips the role.
+     */
+    private boolean isGameMasterEnabled() {
+        return client.getGame().getOptions().booleanOption(OptionsConstants.GAME_MASTER_ALLOW)
+              && client.getLocalPlayer().isGameMaster();
+    }
+
+    /**
+     * Create various menus related to GameMaster (GM) mode
+     */
+    private JMenu createGameMasterMenu() {
+        JMenu menu = new JMenu(Messages.getString("Gamemaster.Gamemaster"));
+        if (isGameMasterEnabled()) {
+            // Configure is not offered here any more: it is a lobby dialog, about how a unit is built, crewed and
+            // deployed, and in play a gamemaster wants the unit's condition, which Edit Damage now covers.
+            // A gamemaster acts on a single unit from its Edit Damage dialog, which now holds destroy, withdraw and
+            // owner change. So the map menu only opens that dialog per unit, and otherwise offers the hex and board
+            // tools; the old per-unit destroy, rescue and traitor submenus have moved into the dialog.
+            JMenu dmgMenu = new JMenu(Messages.getString("Gamemaster.EditDamage"));
+            JMenu specialCommandsMenu = GameMasterCommandMenu.createSpecialCommandsMenu(gui, coords);
+
+            // Ignoring targetability is deliberate: a gamemaster edits units rather than shooting at them, and an
+            // Advanced Building reports itself untargetable because it is shot at as a hex rather than as a unit.
+            // Filtering on it left buildings out of this list entirely, which dropped the whole submenu.
+            var entities = client.getGame().getEntitiesVector(boardLocation, true);
+
+            for (Entity entity : entities) {
+                dmgMenu.add(createUnitEditorMenuItem(entity));
+            }
+            if (dmgMenu.getItemCount() != 0) {
+                menu.add(dmgMenu);
+                menu.addSeparator();
+            }
+            // Change Terrain has a dialog of its own rather than a generated form, because what a gamemaster may
+            // legally set depends on what the hex already holds, and the generated form cannot know that.
+            menu.add(createChangeTerrainMenuItem());
+            menu.add(createBuildingMenuItem());
+            if (client.getGame().getOptions().booleanOption(OptionsConstants.VICTORY_USE_OBJECTIVES)) {
+                menu.add(createObjectiveMenuItem());
+                if (!entities.isEmpty()) {
+                    menu.add(createScanTargetMenu(entities));
+                }
+            }
+            menu.add(specialCommandsMenu);
+        }
+        return menu;
+    }
+
+    /**
+     * Opens the control point pane on the hex that was right-clicked, to change the objective there, remove it, or
+     * put a new one there, at any time in the game. The edit goes to the server, which replaces the marker and
+     * tells every client (Objectives series, game master tools).
+     */
+    private JMenuItem createObjectiveMenuItem() {
+        ObjectiveMarker existing = objectiveAt(coords);
+        JMenuItem item = new JMenuItem(Messages.getString(
+              (existing != null) ? "Gamemaster.cmd.objective.edit" : "Gamemaster.cmd.objective.add"));
+        item.addActionListener(event -> editObjectiveAsGameMaster(existing));
+        return item;
+    }
+
+    /**
+     * Marks the units standing in the right-clicked hex as ones the mission wants scanned, or unmarks them. Ticking
+     * every vehicle of a convoy makes the convoy the scanning objective: once any unit is marked, only marked units
+     * are worth reading (Objectives series, game master tools).
+     */
+    private JMenu createScanTargetMenu(List<Entity> entities) {
+        JMenu menu = new JMenu(Messages.getString("Gamemaster.cmd.scanTarget"));
+        for (Entity entity : entities) {
+            JCheckBoxMenuItem item = new JCheckBoxMenuItem(entity.getShortName(), entity.isDesignatedScanTarget());
+            item.addActionListener(event -> client.sendScanDesignation(entity.getId(), item.isSelected()));
+            menu.add(item);
+        }
+        return menu;
+    }
+
+    private @Nullable ObjectiveMarker objectiveAt(Coords hex) {
+        for (ICarryable groundObject : client.getGame().getGroundObjects(hex)) {
+            if (groundObject instanceof ObjectiveMarker marker) {
+                return marker;
+            }
+        }
+        return null;
+    }
+
+    private void editObjectiveAsGameMaster(@Nullable ObjectiveMarker existing) {
+        ObjectiveMarker marker = existing;
+        if (marker == null) {
+            marker = new ObjectiveMarker();
+            marker.setName(Messages.getString("VictoryHex.name", coords.getBoardNum()));
+            marker.setOwnerId(client.getLocalPlayer().getId());
+        }
+        VictoryHexPropertiesPane.Result result = VictoryHexPropertiesPane.edit(gui.getFrame(), marker,
+              client.getGame().getPlayersList(), true);
+        switch (result) {
+            case SAVED -> client.sendObjectiveEdit(coords, marker);
+            case REMOVED -> client.sendObjectiveEdit(coords, null);
+            case CANCELLED -> { /* nothing sent; the server's copy stands */ }
+        }
+    }
+
+    /** Opens the Building dialog on the hex that was right-clicked, to put one up, change it or remove it. */
+    private JMenuItem createBuildingMenuItem() {
+        JMenuItem item = new JMenuItem(Messages.getString("Gamemaster.cmd.building.longName"));
+        item.addActionListener(event -> new BuildingEditDialog(gui.getFrame(), gui, coords).setVisible(true));
+        return item;
+    }
+
+    /** Opens the Change Terrain dialog on the hex that was right-clicked. */
+    private JMenuItem createChangeTerrainMenuItem() {
+        // named from the command rather than from the dialog's title, so this entry reads the same as the one on the
+        // Commands button and carries the same mark
+        JMenuItem item = new JMenuItem(Messages.getString("Gamemaster.cmd.changeTerrain.longName"));
+        item.addActionListener(event -> new HexEditDialog(gui.getFrame(), gui, coords).setVisible(true));
+        return item;
+    }
+
+    JMenuItem createUnitEditorMenuItem(Entity entity) {
+        JMenuItem item = new JMenuItem(entity.getDisplayName());
+        item.addActionListener(evt -> {
+            // This menu item is only built for a gamemaster, so the dialog offers the full editing tools directly.
+            // The dialog commits its edits to the server itself, so there is nothing to send here when it closes.
+            UnitEditorDialog med = new UnitEditorDialog(gui.getFrame(),
+                  entity,
+                  true,
+                  client);
+            gui.getBoardView().setShouldIgnoreKeys(true);
+            med.setVisible(true);
+            med.dispose();
+            gui.getBoardView().setShouldIgnoreKeys(false);
+        });
+        return item;
+    }
+
+    private JMenu createSelectMenu() {
+        JMenu menu = new JMenu("Select");
+        if (canSelectEntities()) {
+            for (Entity entity : client.getGame().getEntitiesVector(boardLocation, canTargetEntities())) {
+                if (client.getMyTurn().isValidEntity(entity, client.getGame())) {
+                    menu.add(selectJMenuItem(entity));
+                }
+            }
+        }
+        return menu;
+    }
+
+    private JMenu createViewMenu() {
+        JMenu menu = new JMenu("View");
+        Game game = client.getGame();
+        Player localPlayer = client.getLocalPlayer();
+        int playerId = localPlayer.getId();
+
+        for (Entity entity : game.getEntitiesVector(boardLocation, true)) {
+            // Skip hidden entities
+            if (entity.isHidden() && !(entity.getOwnerId() == playerId)) {
+                continue;
+            }
+            // Only add the unit if it's actually visible
+            // With double-blind on, the game may unsee units
+            if (!entity.isSensorReturn(localPlayer) && entity.hasSeenEntity(localPlayer)) {
+                menu.add(viewJMenuItem(entity));
+                menu.add(viewReadoutJMenuItem(entity));
+            }
+        }
+        return menu;
+    }
+
+    private JMenu createMovementMenu(boolean entityInHex) {
+        JMenu menu = new JMenu("Movement");
+
+        if (myEntity == null) {
+            return menu;
+        }
+
+        if (entityInHex) {
+            JMenuItem item = new JMenuItem(Messages.getString("MovementDisplay.MoveEnvelope"));
+            item.setActionCommand(MoveCommand.MOVE_ENVELOPE.getCmd());
+            item.addActionListener(evt -> {
+                try {
+                    ((MovementDisplay) currentPanel).actionPerformed(evt);
+                } catch (Exception ex) {
+                    logger.error(ex, "");
+                }
+            });
+            menu.add(item);
+
+            item = new JMenuItem(Messages.getString("MovementDisplay.moveChaff"));
+            item.setActionCommand(MoveCommand.MOVE_CHAFF.getCmd());
+            item.addActionListener(evt -> {
+                try {
+                    ((MovementDisplay) currentPanel).actionPerformed(evt);
+                } catch (Exception ex) {
+                    logger.error(ex, "");
+                }
+            });
+            menu.add(item);
+
+            item = new JMenuItem(Messages.getString("MovementDisplay.butWalk"));
+            item.setActionCommand(MoveCommand.MOVE_WALK.getCmd());
+            item.addActionListener(evt -> {
+                try {
+                    ((MovementDisplay) currentPanel).actionPerformed(evt);
+                } catch (Exception ex) {
+                    logger.error(ex, "");
+                }
+            });
+            menu.add(item);
+
+            item = new JMenuItem(Messages.getString("MovementDisplay.butBackup"));
+            item.setActionCommand(MoveCommand.MOVE_BACK_UP.getCmd());
+            item.addActionListener(evt -> {
+                try {
+                    ((MovementDisplay) currentPanel).actionPerformed(evt);
+                } catch (Exception ex) {
+                    logger.error(ex, "");
+                }
+            });
+
+            menu.add(item);
+
+            if (myEntity.getAnyTypeMaxJumpMP() > 0) {
+                item = new JMenuItem(Messages.getString("CommonMenuBar.moveJump"));
+                item.setActionCommand(MoveCommand.MOVE_JUMP.getCmd());
+                item.addActionListener(evt -> {
+                    try {
+                        ((MovementDisplay) currentPanel).actionPerformed(evt);
+                    } catch (Exception ex) {
+                        logger.error(ex, "");
+                    }
+                });
+                menu.add(item);
+            }
+
+            if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_TAC_OPS_EVADE)) {
+                item = new JMenuItem(Messages.getString("MovementDisplay.butEvade"));
+                item.setActionCommand(MoveCommand.MOVE_EVADE.getCmd());
+                item.addActionListener(evt -> {
+                    try {
+                        ((MovementDisplay) currentPanel).actionPerformed(evt);
+                    } catch (Exception ex) {
+                        logger.error(ex, "");
+                    }
+                });
+                menu.add(item);
+            }
+
+            if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_VEHICLE_ADVANCED_MANEUVERS)) {
+                item = new JMenuItem(Messages.getString("MovementDisplay.butEvade"));
+                item.setActionCommand(MoveCommand.MOVE_BOOTLEGGER.getCmd());
+                item.addActionListener(evt -> {
+                    try {
+                        ((MovementDisplay) currentPanel).actionPerformed(evt);
+                    } catch (Exception ex) {
+                        logger.error(ex, "");
+                    }
+                });
+                menu.add(item);
+            }
+
+            if (game.getPlanetaryConditions().isRecklessConditions()
+                  && !board.isSpace()
+                  && !game.getOptions().booleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_NO_NIGHT_MOVE_PEN)) {
+                item = new JMenuItem(Messages.getString("MovementDisplay.butReckless"));
+                item.setActionCommand(MoveCommand.MOVE_RECKLESS.getCmd());
+                item.addActionListener(evt -> {
+                    try {
+                        ((MovementDisplay) currentPanel).actionPerformed(evt);
+                    } catch (Exception ex) {
+                        logger.error(ex, "");
+                    }
+                });
+                menu.add(item);
+            }
+        } else {
+            JMenuItem item = new JMenuItem(Messages.getString("MovementDisplay.butWalk"));
+            item.setActionCommand(MoveCommand.MOVE_WALK.getCmd());
+            item.addActionListener(evt -> {
+                try {
+                    plotCourse(evt);
+                } catch (Exception ex) {
+                    logger.error(ex, "");
+                }
+            });
+
+            menu.add(item);
+
+            item = new JMenuItem(Messages.getString("MovementDisplay.butBackup"));
+            item.setActionCommand(MoveCommand.MOVE_BACK_UP.getCmd());
+            item.addActionListener(evt -> {
+                try {
+                    plotCourse(evt);
+                } catch (Exception ex) {
+                    logger.error(ex, "");
+                }
+            });
+
+            menu.add(item);
+
+            if (myEntity.getAnyTypeMaxJumpMP() > 0) {
+                item = new JMenuItem(Messages.getString("CommonMenuBar.moveJump"));
+                item.setActionCommand(MoveCommand.MOVE_JUMP.getCmd());
+                item.addActionListener(evt -> {
+                    try {
+                        plotCourse(evt);
+                    } catch (Exception ex) {
+                        logger.error(ex, "");
+                    }
+                });
+                menu.add(item);
+            }
+
+            item = new JMenuItem(Messages.getString("MovementDisplay.moveLongestRun"));
+
+            item.setActionCommand(MoveCommand.MOVE_LONGEST_RUN.getCmd());
+            item.addActionListener(evt -> {
+                try {
+                    plotCourse(evt);
+                } catch (Exception ex) {
+                    logger.error(ex, "");
+                }
+            });
+
+            menu.add(item);
+
+            item = new JMenuItem(Messages.getString("MovementDisplay.moveLongestWalk"));
+            item.setActionCommand(MoveCommand.MOVE_LONGEST_WALK.getCmd());
+            item.addActionListener(evt -> {
+                try {
+                    plotCourse(evt);
+                } catch (Exception ex) {
+                    logger.error(ex, "");
+                }
+            });
+
+            menu.add(item);
+
+            if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_TAC_OPS_EVADE)) {
+                item = new JMenuItem(Messages.getString("MovementDisplay.butEvade"));
+                item.setActionCommand(MoveCommand.MOVE_EVADE.getCmd());
+                item.addActionListener(evt -> {
+                    try {
+                        plotCourse(evt);
+                    } catch (Exception ex) {
+                        logger.error(ex, "");
+                    }
+                });
+                menu.add(item);
+            }
+
+            if (game.getPlanetaryConditions().isRecklessConditions()
+                  && !board.isSpace()
+                  && !game.getOptions().booleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_NO_NIGHT_MOVE_PEN)) {
+                item = new JMenuItem(Messages.getString("MovementDisplay.butReckless"));
+                item.setActionCommand(MoveCommand.MOVE_RECKLESS.getCmd());
+                item.addActionListener(evt -> {
+                    try {
+                        plotCourse(evt);
+                    } catch (Exception ex) {
+                        logger.error(ex, "");
+                    }
+                });
+                menu.add(item);
+            }
+        }
+
+        return menu;
+    }
+
+    private JMenu createTurnMenu() {
+        JMenu menu = new JMenu(Messages.getString("MovementDisplay.butTurn"));
+
+        JMenuItem item = new JMenuItem(Messages.getString("MovementDisplay.butTurnRight"));
+        item.setActionCommand(MoveCommand.MOVE_TURN_RIGHT.getCmd());
+        item.addActionListener(evt -> {
+            try {
+                ((MovementDisplay) currentPanel).actionPerformed(evt);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        menu.add(item);
+
+        item = new JMenuItem(Messages.getString("MovementDisplay.butTurnLeft"));
+        item.setActionCommand(MoveCommand.MOVE_TURN_LEFT.getCmd());
+        item.addActionListener(evt -> {
+            try {
+                ((MovementDisplay) currentPanel).actionPerformed(evt);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        menu.add(item);
+
+        item = new JMenuItem("About Face");
+        item.setActionCommand(MoveCommand.MOVE_TURN_RIGHT.getCmd());
+        item.addActionListener(evt -> {
+            try {
+                ((MovementDisplay) currentPanel).actionPerformed(evt);
+                ((MovementDisplay) currentPanel).actionPerformed(evt);
+                ((MovementDisplay) currentPanel).actionPerformed(evt);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        menu.add(item);
+
+        return menu;
+    }
+
+    private JMenu createWeaponsFireMenu(FiringDisplay firingDisplay) {
+        JMenu menu = new JMenu("Weapons");
+
+        // Hidden entities are not allowed to shoot without being revealed
+        // so let's not give them the option
+        if (myEntity.isHidden()) {
+            return menu;
+        }
+
+        menu.add(createFireJMenuItem(firingDisplay));
+        menu.add(createSkipJMenuItem());
+        menu.add(createAlphaStrikeJMenuItem());
+
+        if (myEntity.canFlipArms()) {
+            menu.add(createFlipArmsJMenuItem());
+        }
+
+        return menu;
+    }
+
+    private JMenuItem createSkipJMenuItem() {
+        JMenuItem item = new JMenuItem("Skip");
+        item.addActionListener(evt -> {
+            try {
+                ((FiringDisplay) currentPanel).nextWeapon();
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+
+        return item;
+    }
+
+    private JMenuItem createAlphaStrikeJMenuItem() {
+        JMenuItem item = new JMenuItem("Alpha Strike");
+        item.addActionListener(evt -> {
+            try {
+                FiringDisplay panel = (FiringDisplay) currentPanel;
+                // Get all weapons
+                List<WeaponMounted> weapons = myEntity.getWeaponList();
+                // We will need to map a Mounted to its weapon number
+                HashMap<WeaponMounted, Integer> weaponToId = new HashMap<>();
+                for (WeaponMounted weapon : weapons) {
+                    weaponToId.put(weapon, myEntity.getEquipmentNum(weapon));
+                }
+                // Sort weapons from high damage to low
+                weapons.sort(new WeaponComparatorDamage(false));
+
+                Targetable target = panel.getTarget();
+                for (WeaponMounted weapon : weapons) {
+                    // If the weapon has been used at all this turn, ignore
+                    if (!weapon.usedInPhase().isUnknown()) {
+                        continue;
+                    }
+                    int weaponNum = weaponToId.get(weapon);
+                    // Used to determine if attack is valid
+                    WeaponAttackAction waa = new WeaponAttackAction(myEntity.getId(),
+                          target.getTargetType(),
+                          target.getId(),
+                          weaponNum);
+                    // Only fire weapons that have a chance to hit
+                    int toHitVal = waa.toHit(game).getValue();
+                    if (toHitVal <= 12) {
+                        gui.getUnitDisplay().wPan.selectWeapon(weaponNum);
+                        panel.fire();
+                    }
+                }
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+
+        return item;
+    }
+
+    private JMenuItem createFlipArmsJMenuItem() {
+        JMenuItem item = new JMenuItem("Flip Arms");
+
+        item.setActionCommand(Integer.toString(myEntity.getId()));
+        item.addActionListener(evt -> {
+            try {
+                FiringDisplay display = (FiringDisplay) currentPanel;
+
+                int id = Integer.parseInt(evt.getActionCommand());
+                Entity entity = game.getEntity(id);
+
+                if (entity != null) {
+                    display.updateFlipArms(!entity.getArmsFlipped());
+                }
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+
+        return item;
+    }
+
+    /**
+     * Creates the "Fire" item, which declares an attack with the weapon currently selected in the unit display.
+     * <p>
+     * The item is enabled only when {@link FiringDisplay#isFireAllowed()} is {@code true}, so that it refuses exactly
+     * what the Fire button refuses. Without that gate the menu can declare attacks the rules forbid, such as a Swarm
+     * or Leg Attack by a conventional infantry platoon that has already fired its primary weapons; the server then
+     * rejects both attacks and the platoon does nothing at all (issue #8626). As with the Fire button, the reason for
+     * a refusal is the to-hit text in the unit display.
+     *
+     * @param firingDisplay the firing phase display that owns the attack declaration and its legality gate
+     *
+     * @return the "Fire" menu item
+     */
+    private JMenuItem createFireJMenuItem(FiringDisplay firingDisplay) {
+        JMenuItem item = new JMenuItem("Fire");
+
+        boolean isFireAllowed = firingDisplay.isFireAllowed();
+        item.setEnabled(isFireAllowed);
+        if (!isFireAllowed) {
+            logger.debug("[MapMenu] Fire item disabled for {}: the Fire button is not currently enabled; "
+                  + "the unit display's to-hit line states the reason", myEntity.getShortName());
+        }
+
+        item.addActionListener(event -> {
+            try {
+                firingDisplay.fire();
+            } catch (Exception exception) {
+                logger.error(exception, "");
+            }
+        });
+
+        return item;
+    }
+
+    private JMenu createPhysicalMenu(boolean isMovementPhase) {
+        JMenu menu = new JMenu("Physicals");
+
+        if (isMovementPhase) {
+            if (myEntity.canCharge()) {
+
+                JMenuItem item = createChargeMenuItem();
+
+                if (item != null) {
+                    menu.add(item);
+                }
+            }
+
+            if (myEntity.canDFA()) {
+                JMenuItem item = createDFAJMenuItem();
+
+                if (item != null) {
+                    menu.add(item);
+                }
+            }
+        } else {
+
+            if (!myEntity.isHullDown() && !myEntity.isProne() && !myEntity.hasHipCrit()) {
+                menu.add(createKickJMenuItem());
+                menu.add(createTripJMenuItem());
+            }
+
+            if ((myEntity instanceof BipedMek) &&
+                  (!myEntity.isLocationBad(Mek.LOC_LEFT_ARM) || !myEntity.isLocationBad(Mek.LOC_RIGHT_ARM))) {
+                menu.add(createPunchJMenuItem());
+            }
+
+            if ((myEntity instanceof BipedMek) &&
+                  !myEntity.isLocationBad(Mek.LOC_LEFT_ARM) &&
+                  !myEntity.isLocationBad(Mek.LOC_RIGHT_ARM)) {
+                menu.add(createPushJMenuItem());
+            }
+
+            if (myEntity.getJumpMP() > 0) {
+                menu.add(createJumpJetAttackJMenuItem());
+            }
+
+            if (myEntity.isProne()) {
+                menu.add(createThrashJMenuItem());
+            }
+
+            menu.add(createDodgeJMenuItem());
+
+            if (!myEntity.getClubs().isEmpty()) {
+                JMenu clubMenu = createClubMenu();
+
+                if (clubMenu.getItemCount() > 0) {
+                    menu.add(clubMenu);
+                }
+            }
+
+            // Populate brush-off targets
+            // BAs / Infantry should be handled normally by selecting them as a target, we just
+            // don't have a good GUI way to do that for iNarc pods.
+            List<Targetable> inarcs = PhysicalDisplay.getINarcPods(myEntity, coords);
+            if (!inarcs.isEmpty()) {
+                for (Targetable brushTarget : inarcs) {
+                    menu.add(createBrushOffJMenuItem(brushTarget));
+                }
+            }
+
+            ToHitData grappleAttackActionToHitData = GrappleAttackAction.toHit(client.getGame(),
+                  myEntity.getId(),
+                  myTarget);
+            ToHitData breakGrappleAttackActionToHitData = BreakGrappleAttackAction.toHit(client.getGame(),
+                  myEntity.getId(),
+                  myTarget);
+            if ((grappleAttackActionToHitData.getValue() != TargetRoll.IMPOSSIBLE)
+                  || (breakGrappleAttackActionToHitData.getValue()
+                  != TargetRoll.IMPOSSIBLE)) {
+                menu.add(createGrappleJMenuItem());
+            }
+            if (myTarget != null) {
+                ToHitData baVibroClawAttackActionToHitData = BAVibroClawAttackAction.toHit(client.getGame(),
+                      myEntity.getId(),
+                      myTarget);
+                if (baVibroClawAttackActionToHitData.getValue() != TargetRoll.IMPOSSIBLE) {
+                    menu.add(createVibroClawMenuItem());
+                }
+            }
+
+        }
+
+        return menu;
+    }
+
+    private JMenu createStandMenu() {
+        JMenu menu = new JMenu();
+
+        if (selectedEntity.isProne()) {
+            menu.setText("Stand");
+            menu.add(createStandJMenuItem(false));
+
+            if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_TAC_OPS_CAREFUL_STAND) &&
+                  (myEntity.getWalkMP() > 2) &&
+                  (myEntity.moved == EntityMovementType.MOVE_NONE)) {
+                menu.add(createStandJMenuItem(true));
+            }
+
+            if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_TAC_OPS_HULL_DOWN)) {
+                menu.add(createHullDownJMenuItem());
+            }
+
+        } else if (selectedEntity.isHullDown()) {
+            menu.setText("Stand");
+            menu.add(createStandJMenuItem(false));
+
+            if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_TAC_OPS_CAREFUL_STAND)) {
+                menu.add(createStandJMenuItem(true));
+            }
+
+            menu.add(createProneJMenuItem());
+        } else {
+            menu.setText("Prone");
+            menu.add(createProneJMenuItem());
+
+            if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_TAC_OPS_HULL_DOWN)) {
+                menu.add(createHullDownJMenuItem());
+            }
+        }
+
+        return menu;
+    }
+
+    private JMenuItem createStandJMenuItem(boolean carefulStand) {
+        JMenuItem item = new JMenuItem(Messages.getString("MovementDisplay.butUp"));
+
+        if (carefulStand) {
+            item.setText("Careful Stand");
+            item.setActionCommand(MoveCommand.MOVE_CAREFUL_STAND.getCmd());
+        } else {
+            item.setActionCommand(MoveCommand.MOVE_GET_UP.getCmd());
+        }
+        item.addActionListener(evt -> {
+            try {
+                ((MovementDisplay) currentPanel).actionPerformed(evt);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+
+        return item;
+    }
+
+    private JMenuItem createHullDownJMenuItem() {
+        JMenuItem item = new JMenuItem(Messages.getString("MovementDisplay.butHullDown"));
+        item.setActionCommand(MoveCommand.MOVE_HULL_DOWN.getCmd());
+        item.addActionListener(evt -> {
+            try {
+                ((MovementDisplay) currentPanel).actionPerformed(evt);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createProneJMenuItem() {
+        JMenuItem item = new JMenuItem(Messages.getString("MovementDisplay.butDown"));
+        item.setActionCommand(MoveCommand.MOVE_GO_PRONE.getCmd());
+        item.addActionListener(evt -> {
+            try {
+                ((MovementDisplay) currentPanel).actionPerformed(evt);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenu createConvertMenu() {
+        JMenu menu = new JMenu(Messages.getString("MovementDisplay.moveModeConvert"));
+
+        if (myEntity instanceof Mek && ((Mek) myEntity).hasTracks()) {
+            menu.add(createConvertMenuItem("MovementDisplay.moveModeLeg", MoveCommand.MOVE_MODE_LEG, false));
+            menu.add(createConvertMenuItem("MovementDisplay.moveModeTrack", MoveCommand.MOVE_MODE_VEE, false));
+        } else if (myEntity instanceof QuadVee) {
+            menu.add(createConvertMenuItem("MovementDisplay.moveModeMek",
+                  MoveCommand.MOVE_MODE_LEG,
+                  myEntity.getConversionMode() == QuadVee.CONV_MODE_MEK));
+            menu.add(createConvertMenuItem("MovementDisplay.moveModeVee",
+                  MoveCommand.MOVE_MODE_VEE,
+                  myEntity.getConversionMode() == QuadVee.CONV_MODE_VEHICLE));
+        } else if (myEntity instanceof LandAirMek) {
+            int currentMode = myEntity.getConversionMode();
+            JMenuItem item = createConvertMenuItem("MovementDisplay.moveModeMek",
+                  MoveCommand.MOVE_MODE_LEG,
+                  currentMode == LandAirMek.CONV_MODE_MEK);
+            item.setEnabled(currentMode == LandAirMek.CONV_MODE_MEK ||
+                  ((LandAirMek) myEntity).canConvertTo(currentMode, LandAirMek.CONV_MODE_MEK));
+            menu.add(item);
+            if (((LandAirMek) myEntity).getLAMType() == LandAirMek.LAM_STANDARD) {
+                item = createConvertMenuItem("MovementDisplay.moveModeAirMek",
+                      MoveCommand.MOVE_MODE_VEE,
+                      currentMode == LandAirMek.CONV_MODE_AIR_MEK);
+                item.setEnabled(currentMode == LandAirMek.CONV_MODE_AIR_MEK ||
+                      ((LandAirMek) myEntity).canConvertTo(currentMode, LandAirMek.CONV_MODE_AIR_MEK));
+                menu.add(item);
+            }
+            item = createConvertMenuItem("MovementDisplay.moveModeFighter",
+                  MoveCommand.MOVE_MODE_AIR,
+                  currentMode == LandAirMek.CONV_MODE_FIGHTER);
+            item.setEnabled(currentMode == LandAirMek.CONV_MODE_FIGHTER ||
+                  ((LandAirMek) myEntity).canConvertTo(currentMode, LandAirMek.CONV_MODE_FIGHTER));
+            menu.add(item);
+        }
+        return menu;
+    }
+
+    private JMenuItem createConvertMenuItem(String resourceKey, MoveCommand cmd, boolean isCurrent) {
+        String text = Messages.getString(resourceKey);
+        if (isCurrent) {
+            text = "No Conversion";
+        }
+        JMenuItem item = new JMenuItem(text);
+        item.setActionCommand(cmd.getCmd());
+        item.addActionListener(evt -> {
+            try {
+                ((MovementDisplay) currentPanel).actionPerformed(evt);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenu createTargetMenu() {
+        JMenu menu = new JMenu("Target");
+
+        // If we can't target entities, nothing to do
+        if (!canTargetEntities() || (board.getHex(coords) == null)) {
+            return menu;
+        }
+
+        // VTOLs/AirMeks making strafing or bombing attacks already declared the target hex(es) in the movement phase
+        // and cannot change them.
+        if (myEntity.isMakingVTOLGroundAttack()) {
+            return menu;
+        }
+
+        final boolean isFiringDisplay = (currentPanel instanceof FiringDisplay);
+        final boolean isTargetingDisplay = (currentPanel instanceof TargetingPhaseDisplay);
+        final boolean canStartFires = client.getGame()
+              .getOptions()
+              .booleanOption(OptionsConstants.ADVANCED_COMBAT_TAC_OPS_START_FIRE);
+
+        Player localPlayer = client.getLocalPlayer();
+
+        // Add menu item to target each entity in the coords
+        for (Entity entity : client.getGame().getEntitiesVector(coords, board.getBoardId(), false)) {
+            // Only add the unit if it's actually visible; with double-blind on, the game may have unseen units
+            if (!entity.isSensorReturn(localPlayer) && entity.hasSeenEntity(localPlayer) && !entity.isHidden()) {
+                menu.add(targetMenuItem(entity));
+            }
+        }
+
+        Hex h = board.getHex(coords);
+
+        // Clearing hexes and igniting hexes
+        if (isFiringDisplay && !board.isSpace() && !board.isLowAltitude()) {
+            menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_HEX_CLEAR)));
+            if (canStartFires
+                  && (h.hasVegetation() || h.containsTerrain(Terrains.FIELDS))) {
+                menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_HEX_IGNITE)));
+            }
+        }
+
+        // Targeting fuel tanks
+        if (h.containsTerrain(Terrains.FUEL_TANK)) {
+            menu.add(targetMenuItem(new BuildingTarget(coords, board, false)));
+            if (canStartFires) {
+                menu.add(targetMenuItem(new BuildingTarget(coords, board, true)));
+            }
+        }
+
+        // Targeting buildings or bridges
+        if ((h.containsTerrain(Terrains.BUILDING) || h.containsTerrain(Terrains.BRIDGE))) {
+            menu.add(targetMenuItem(new BuildingTarget(coords, board, false)));
+            if (canStartFires) {
+                menu.add(targetMenuItem(new BuildingTarget(coords, board, true)));
+            }
+        }
+
+        if (isFiringDisplay) {
+            if (board.isSpace() && hasAmmoType(AmmoType.AmmoTypeEnum.SCREEN_LAUNCHER)) {
+                menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_HEX_SCREEN)));
+            } else {
+                if ((hasAmmoType(AmmoType.AmmoTypeEnum.LRM)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.LRM_IMP)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.MML)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.TBOLT_10)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.TBOLT_15)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.TBOLT_20))
+                      && (hasMunitionType(AmmoType.Munitions.M_FASCAM)
+                      || hasMunitionType(AmmoType.Munitions.M_THUNDER)
+                      || hasMunitionType(AmmoType.Munitions.M_THUNDER_ACTIVE)
+                      || hasMunitionType(AmmoType.Munitions.M_THUNDER_AUGMENTED)
+                      || hasMunitionType(AmmoType.Munitions.M_THUNDER_INFERNO)
+                      || hasMunitionType(AmmoType.Munitions.M_THUNDER_VIBRABOMB))) {
+                    menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_MINEFIELD_DELIVER)));
+                }
+
+                if (hasMunitionType(AmmoType.Munitions.M_FLARE)) {
+                    menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_FLARE_DELIVER)));
+                }
+
+                if (hasAmmoType(AmmoType.AmmoTypeEnum.BA_MICRO_BOMB)) {
+                    menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_HEX_BOMB)));
+                }
+
+                if (hasWeaponFlag(WeaponType.F_MRM)
+                      && EquipmentActivation.hasActiveGuidance(myEntity, MiscType.F_APOLLO)
+                      && Game.rulesManager.getRulesWeapons().getApolloSaturationMode()) {
+                    menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_SATURATION)));
+                }
+
+                if (hasWeaponFlag(WeaponType.F_DIVE_BOMB)
+                      || hasWeaponFlag(WeaponType.F_ALT_BOMB)) {
+                    menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_HEX_AERO_BOMB)));
+                }
+
+                if (hasAmmoType(AmmoType.AmmoTypeEnum.ARROW_IV)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.SNIPER)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.CRUISE_MISSILE)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.ALAMO)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.KILLER_WHALE)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.LONG_TOM)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.THUMPER)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.BA_TUBE)) {
+                    menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_HEX_ARTILLERY)));
+                }
+                // canStartFires is the TacOps fire game option (ADVANCED_COMBAT_TAC_OPS_START_FIRE), not a unit
+                // trait: extinguishing is only offered when the fire rules are in play, the same option that
+                // gates igniting hexes above. A unit qualifies if it carries a fire extinguisher weapon or is a
+                // firefighting-engineer platoon (TO:AuE p.153).
+                if (canStartFires && (hasFireExtinguisher() || myEntity.isFirefighter())
+                      && h.containsTerrain(Terrains.FIRE)) {
+                    menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_HEX_EXTINGUISH)));
+                }
+            }
+        }
+        // Check for Mine Clearance
+        if (isFiringDisplay || isTargetingDisplay) {
+            if (client.getGame().containsMinefield(coords)) {
+                menu.add(targetMenuItem(new MinefieldTarget(coords)));
+            }
+        }
+
+        if (isTargetingDisplay
+              && !board.isSpace()
+              && !board.isLowAltitude()
+              && (hasAmmoType(AmmoType.AmmoTypeEnum.ARROW_IV)
+              || hasAmmoType(AmmoType.AmmoTypeEnum.SNIPER)
+              || hasAmmoType(AmmoType.AmmoTypeEnum.CRUISE_MISSILE)
+              || hasAmmoType(AmmoType.AmmoTypeEnum.ALAMO)
+              || hasAmmoType(AmmoType.AmmoTypeEnum.KILLER_WHALE)
+              || hasAmmoType(AmmoType.AmmoTypeEnum.LONG_TOM)
+              || hasAmmoType(AmmoType.AmmoTypeEnum.THUMPER)
+              || hasAmmoType(AmmoType.AmmoTypeEnum.BA_TUBE))) {
+            menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_HEX_ARTILLERY)));
+        }
+        // Check for adding TAG targeting buildings and hexes
+        if (isTargetingDisplay && myEntity.hasTAG() && !board.isSpace()) {
+            menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_HEX_TAG)));
+            if (h.containsTerrain(Terrains.FUEL_TANK)
+                  || h.containsTerrain(Terrains.BUILDING)
+                  || h.containsTerrain(Terrains.BRIDGE)) {
+                menu.add(targetMenuItem(new BuildingTarget(coords, board, Targetable.TYPE_BLDG_TAG)));
+            }
+        }
+        return menu;
+    }
+
+    void plotCourse(ActionEvent e) {
+        ((MovementDisplay) currentPanel).actionPerformed(e);
+
+        // Cursor over the hex.
+        gui.getBoardView()
+              .mouseAction(coords, BoardViewEvent.BOARD_HEX_CURSOR, InputEvent.BUTTON1_DOWN_MASK, MouseEvent.BUTTON1);
+        // Click
+        gui.getBoardView()
+              .mouseAction(coords, BoardViewEvent.BOARD_HEX_CLICKED, InputEvent.BUTTON1_DOWN_MASK, MouseEvent.BUTTON1);
+    }
+
+    Targetable decodeTargetInfo(String info) {
+        StringTokenizer target = new StringTokenizer(info, "|");
+        String type = target.nextToken();
+
+        if (type.equalsIgnoreCase("E")) {
+            return game.getEntity(Integer.parseInt(target.nextToken()));
+        }
+
+        Coords targetCoords = new Coords(Integer.parseInt(target.nextToken()), Integer.parseInt(target.nextToken()));
+
+        if (type.equals("B")) {
+            return new BuildingTarget(targetCoords, board, Integer.parseInt(target.nextToken()));
+        }
+
+        if (type.equals("M")) {
+            return new MinefieldTarget(targetCoords);
+        }
+
+        return new HexTarget(targetCoords, board, Integer.parseInt(target.nextToken()));
+    }
+
+    private boolean hasAmmoType(AmmoType.AmmoTypeEnum ammoType) {
+        if (myEntity.getAmmo().isEmpty()) {
+            return false;
+        }
+
+        for (Mounted<?> ammo : myEntity.getAmmo()) {
+            if (((AmmoType) ammo.getType()).getAmmoType() == ammoType) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean hasWeaponFlag(EquipmentFlag weaponFlag) {
+        if (myEntity.getWeaponList().isEmpty()) {
+            return false;
+        }
+
+        for (Mounted<?> wpn : myEntity.getWeaponList()) {
+            if (wpn.getType().hasFlag(weaponFlag)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean hasMunitionType(AmmoType.Munitions munition) {
+        if (myEntity.getAmmo().isEmpty()) {
+            return false;
+        }
+
+        for (Mounted<?> ammo : myEntity.getAmmo()) {
+            if (((AmmoType) ammo.getType()).getMunitionType().contains(munition)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean hasFireExtinguisher() {
+        return myEntity.getWeaponList().stream()
+              .anyMatch(weapon -> weapon.getType().hasFlag(WeaponType.F_EXTINGUISHER));
+    }
+
+    private JMenuItem createTorsoTwistJMenuItem(int direction) {
+        JMenuItem item = new JMenuItem((direction == 1) ? "Right" : "Left");
+        item.setActionCommand(Integer.toString(direction));
+        item.addActionListener(evt -> {
+            try {
+                int twistDir = Integer.parseInt(evt.getActionCommand());
+                if (currentPanel instanceof FiringDisplay) {
+                    ((FiringDisplay) currentPanel).torsoTwist(twistDir);
+                }
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createTorsoTwistJMenuItem(Coords twistCoords) {
+        JMenuItem item = new JMenuItem("Twist");
+        item.setActionCommand(twistCoords.getX() + "|" + twistCoords.getY());
+        item.addActionListener(evt -> {
+            try {
+                StringTokenizer result = new StringTokenizer(evt.getActionCommand(), "|");
+                Coords coord = new Coords(Integer.parseInt(result.nextToken()), Integer.parseInt(result.nextToken()));
+                if (currentPanel instanceof FiringDisplay) {
+                    ((FiringDisplay) currentPanel).torsoTwist(coord);
+                }
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createRotateTurretJMenuItem(final Mek mek, final Mounted<?> turret) {
+        String turretString;
+        if (turret.getType().hasFlag(MiscType.F_SHOULDER_TURRET)) {
+            turretString = "Rotate Shoulder Turret (" + mek.getLocationAbbr(turret.getLocation()) + ")";
+        } else if (turret.getType().hasFlag(MiscType.F_HEAD_TURRET)) {
+            turretString = "Rotate Head Turret";
+        } else {
+            turretString = "Rotate Quad Turret";
+        }
+        JMenuItem item = new JMenuItem(turretString);
+        item.addActionListener(evt -> {
+            TurretFacingDialog tfe = new TurretFacingDialog(gui.frame, mek, turret, gui);
+            tfe.setVisible(true);
+        });
+        return item;
+    }
+
+    private JMenuItem createRotateDualTurretJMenuItem(final Tank tank) {
+        String turretString = "Rotate Front Turret";
+        JMenuItem item = new JMenuItem(turretString);
+        item.addActionListener(evt -> {
+            TurretFacingDialog tfe = new TurretFacingDialog(gui.frame, tank, gui);
+            tfe.setVisible(true);
+        });
+        return item;
+    }
+
+    private JMenu createTorsoTwistMenu() {
+        JMenu menu = new JMenu();
+
+        if (myEntity instanceof BipedMek) {
+            menu.setText("Torso Twist");
+            if (coords.equals(myEntity.getPosition())) {
+                menu.add(createTorsoTwistJMenuItem(1));
+                menu.add(createTorsoTwistJMenuItem(0));
+            } else {
+                menu.add(createTorsoTwistJMenuItem(coords));
+            }
+        } else if ((myEntity instanceof Tank) && (myEntity.getInternal(((Tank) myEntity).getLocTurret()) > -1)) {
+            menu.setText("Turret Twist");
+            if (coords.equals(myEntity.getPosition())) {
+                menu.add(createTorsoTwistJMenuItem(1));
+                menu.add(createTorsoTwistJMenuItem(0));
+            } else {
+                menu.add(createTorsoTwistJMenuItem(coords));
+            }
+        }
+
+        if ((myEntity instanceof Tank) && !((Tank) myEntity).hasNoDualTurret()) {
+            menu.add(createRotateDualTurretJMenuItem((Tank) myEntity));
+        }
+
+        return menu;
+    }
+
+    private JMenu createRotateTurretMenu() {
+        JMenu menu = new JMenu();
+        menu.setText("Turret Rotation");
+        if (myEntity instanceof Mek mek) {
+            for (Mounted<?> mount : myEntity.getMisc()) {
+                if (TurretFacing.isMekTurretItem(mount)) {
+                    menu.add(createRotateTurretJMenuItem(mek, mount));
+                }
+            }
+            // Only the 3-point 360 quad turret uses the rotate dialog; the 2-point front/rear mount is flipped
+            // with the Flip Mount button instead, so it is not offered here. A mount is a whole location, so offer
+            // one entry per location - every directional weapon there shares the mount's facing and rotates together.
+            Set<Integer> directionalLocations = new HashSet<>();
+            for (WeaponMounted weapon : mek.getWeaponList()) {
+                if (weapon.hasDirectional360TorsoMount() && directionalLocations.add(weapon.getLocation())) {
+                    menu.add(createRotateDirectionalMountJMenuItem(mek, weapon));
+                }
+            }
+        }
+        return menu;
+    }
+
+    private JMenuItem createRotateDirectionalMountJMenuItem(final Mek mek, final WeaponMounted weapon) {
+        String label = Messages.getString("MapMenu.rotateDirectionalMount",
+              mek.getLocationAbbr(weapon.getLocation()));
+        JMenuItem item = new JMenuItem(label);
+        // Unavailable when destroyed by damage or already refaced in an earlier phase this turn (once per turn).
+        item.setEnabled(!weapon.isDirectionalMountLocked() && !weapon.isDirectionalMountAlreadyFlipped());
+        item.addActionListener(evt -> {
+            TurretFacingDialog dialog = new TurretFacingDialog(gui.frame, mek, weapon, gui, true);
+            dialog.setVisible(true);
+        });
+        return item;
+    }
+
+    private void selectTarget() {
+        Vector<Entity> list = new Vector<>();
+
+        Player localPlayer = client.getLocalPlayer();
+        boolean friendlyFire = game.getOptions().booleanOption(OptionsConstants.BASE_FRIENDLY_FIRE);
+
+        for (Entity en : game.getEntitiesVector(boardLocation, false)) {
+            // Only add the unit if it's actually visible
+            // With double-blind on, the game may have unseen units
+            if ((en.isEnemyOf(myEntity) || friendlyFire) &&
+                  !en.equals(myEntity) &&
+                  !en.isSensorReturn(localPlayer) &&
+                  en.hasSeenEntity(localPlayer) &&
+                  !en.isHidden()) {
+                list.add(en);
+            }
+        }
+
+        if (list.size() == 1) {
+            myTarget = selectedEntity = list.firstElement();
+            if (currentPanel instanceof FiringDisplay panel) {
+                // The aim window would take focus and close this menu before it can be used (#9472)
+                panel.targetWithoutAimWindow(myTarget);
+            } else if (currentPanel instanceof PhysicalDisplay) {
+                ((PhysicalDisplay) currentPanel).target(myTarget);
+            } else if (currentPanel instanceof TargetingPhaseDisplay) {
+                ((TargetingPhaseDisplay) currentPanel).target(myTarget);
+            }
+        }
+    }
+
+    private JMenu createModeMenu() {
+        JMenu menu = new JMenu("Modes");
+
+        int weaponNum = gui.getUnitDisplay().wPan.getSelectedWeaponNum();
+        Mounted<?> mounted = myEntity.getEquipment(weaponNum);
+
+        if ((mounted != null) && mounted.hasModes()) {
+            for (int pos = 0; pos < mounted.getModesCount(); pos++) {
+                menu.add(createModeJMenuItem(mounted, pos));
+            }
+        }
+
+        return menu;
+    }
+
+    private JMenuItem createModeJMenuItem(Mounted<?> mounted, int position) {
+        JMenuItem item = new JMenuItem();
+
+        // Read from the mount, not its type. An infantry platoon's mount combines the modes of its primary and
+        // secondary weapons, so a mount can offer modes its own type does not have: reading from the type after
+        // counting with getModesCount() walks off the end of the type's list.
+        EquipmentMode mode = mounted.getMode(position);
+
+        // The starred entry is the mode the equipment is already in, so it is described as a state; the rest
+        // are changes the player can pick, and read as instructions.
+        if (mode.equals(mounted.curMode())) {
+            item.setText("* " + mode.getStateName(mounted.getType()));
+        } else {
+            item.setText(mode.getActionName(mounted.getType()));
+        }
+        item.setActionCommand(Integer.toString(position));
+        item.addActionListener(evt -> {
+            try {
+                int modePosition = Integer.parseInt(evt.getActionCommand());
+                int weaponNum = gui.getUnitDisplay().wPan.getSelectedWeaponNum();
+                Mounted<?> equip = myEntity.getEquipment(weaponNum);
+                equip.setMode(modePosition);
+                client.sendModeChange(myEntity.getId(), weaponNum, modePosition);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createPunchJMenuItem() {
+        JMenuItem item = new JMenuItem("Punch");
+        item.addActionListener(evt -> {
+            try {
+                ((PhysicalDisplay) currentPanel).punch();
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createKickJMenuItem() {
+        JMenuItem item = new JMenuItem("Kick");
+        item.addActionListener(evt -> {
+            try {
+                ((PhysicalDisplay) currentPanel).kick();
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createPushJMenuItem() {
+        JMenuItem item = new JMenuItem("Push");
+        item.addActionListener(evt -> {
+            try {
+                ((PhysicalDisplay) currentPanel).push();
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createVibroClawMenuItem() {
+        JMenuItem item = new JMenuItem("Vibro Claw Attack");
+        item.addActionListener(evt -> {
+            try {
+                ((PhysicalDisplay) currentPanel).vibroclawAttack();
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createJumpJetAttackJMenuItem() {
+        JMenuItem item = new JMenuItem("Jump Jet Attack");
+        item.addActionListener(evt -> {
+            try {
+                ((PhysicalDisplay) currentPanel).jumpJetAttack();
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createThrashJMenuItem() {
+        JMenuItem item = new JMenuItem("Thrash");
+        item.addActionListener(evt -> {
+            try {
+                ((PhysicalDisplay) currentPanel).thrash();
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createGrappleJMenuItem() {
+        JMenuItem item = new JMenuItem("Grapple");
+        item.addActionListener(evt -> {
+            try {
+                ((PhysicalDisplay) currentPanel).doGrapple();
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    /**
+     * Create a menu entry for sweeping off a specific target (currently only supports iNarc pods)
+     * Each valid iNarc pod should get one entry with the target's name, which will create the
+     * BrushOffAttackAction to try to clear that target only.
+     * @param brushTarget   Targetable iNarc pod instance
+     * @return              JMenuItem that will launch the physical attack selection dialog
+     */
+    private JMenuItem createBrushOffJMenuItem(Targetable brushTarget) {
+        JMenuItem item = new JMenuItem(String.format("Brush Off [%s]", brushTarget.getDisplayName()));
+
+        item.addActionListener(evt -> {
+            try {
+                ((PhysicalDisplay) currentPanel).doBrush(brushTarget);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createTripJMenuItem() {
+        JMenuItem item = new JMenuItem("Trip");
+        item.addActionListener(evt -> {
+            try {
+                ((PhysicalDisplay) currentPanel).trip();
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenuItem createDodgeJMenuItem() {
+        JMenuItem item = new JMenuItem("Dodge");
+        item.addActionListener(evt -> {
+            try {
+                ((PhysicalDisplay) currentPanel).dodge();
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    private JMenu createClubMenu() {
+        JMenu menu = new JMenu("Weapon");
+
+        for (int pos = 0; pos < myEntity.getClubs().size(); pos++) {
+            Mounted<?> club = myEntity.getClubs().get(pos);
+            if (!club.isDestroyed()) {
+                menu.add(createClubJMenuItem(club.getName(), pos));
+            }
+        }
+        return menu;
+    }
+
+    private JMenuItem createClubJMenuItem(String clubName, int clubNumber) {
+        JMenuItem item = new JMenuItem(clubName);
+        item.setActionCommand(Integer.toString(clubNumber));
+        item.addActionListener(evt -> {
+            try {
+                MiscMounted club = myEntity.getClubs().get(Integer.parseInt(evt.getActionCommand()));
+                ((PhysicalDisplay) currentPanel).club(club);
+            } catch (Exception ex) {
+                logger.error(ex, "");
+            }
+        });
+        return item;
+    }
+
+    @Override
+    public void show(Component comp, int x, int y) {
+        if (client.isMyTurn() && (myEntity != null)) {
+            selectTarget();
+        }
+        super.show(comp, x, y);
+    }
+
+    public boolean getHasMenu() {
+        return hasMenu;
+    }
+}

@@ -1,0 +1,204 @@
+/*
+ * Copyright (C) 2000-2011 Ben Mazur (bmazur@sev.org)
+ * Copyright (C) 2011-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+package megamek.client.bot.princess;
+
+import megamek.common.ToHitData;
+import megamek.common.units.Tank;
+
+/**
+ * This class stores all the calculations of probabilities given the rule set
+ */
+public class ProbabilityCalculator {
+    //How likely am I to hit a certain location with weapons fire, given what direction the fire is coming from
+    //Order is: LOC_HEAD,LOC_CENTER_TORSO,LOC_RIGHT_TORSO,LOC_LEFT_TORSO,LOC_RIGHT_ARM,LOC_LEFT_ARM,LOC_RIGHT_LEG,LOC_LEFT_LEG Defined in megamek.common.units.Mek
+    public static final double[] hitProbabilitiesFront = { 1d / 36, 7d / 36, 5d / 36, 5d / 36, 5d / 36, 5d / 36,
+                                                           4d / 36, 4d / 36 };
+    public static final double[] hitProbabilitiesRightSide = { 1d / 36, 5d / 36, 7d / 36, 4d / 36, 7d / 36, 3d / 36,
+                                                               7d / 36, 3d / 36 };
+    public static final double[] hitProbabilitiesLeftSide = { 1d / 36, 5d / 36, 4d / 36, 7d / 36, 3d / 36, 7d / 36,
+                                                              3d / 36, 7d / 36 };
+
+    //How likely am I to hit a certain location with a punch, given what direction the fire is coming from
+    //Order is: LOC_HEAD,LOC_CENTER_TORSO,LOC_RIGHT_TORSO,LOC_LEFT_TORSO,LOC_RIGHT_ARM,LOC_LEFT_ARM,LOC_RIGHT_LEG,LOC_LEFT_LEG Defined in megamek.common.units.Mek
+    public static final double[] hitProbabilitiesPunchFront = { 1d / 6, 1d / 6, 1d / 6, 1d / 6, 1d / 6, 1d / 6, 0, 0 };
+    public static final double[] hitProbabilitiesPunchRightSide = { 1d / 6, 1d / 6, 2d / 6, 0, 2d / 6, 0, 0, 0 };
+    public static final double[] hitProbabilitiesPunchLeftSide = { 1d / 6, 1d / 6, 0, 2d / 6, 0, 2d / 6, 0, 0 };
+
+    //How likely am I to hit a certain location with a punch, given what direction the fire is coming from
+    //Order is: LOC_HEAD,LOC_CENTER_TORSO,LOC_RIGHT_TORSO,LOC_LEFT_TORSO,LOC_RIGHT_ARM,LOC_LEFT_ARM,LOC_RIGHT_LEG,LOC_LEFT_LEG Defined in megamek.common.units.Mek
+    public static final double[] hitProbabilitiesKickFront = { 0, 0, 0, 0, 0, 0, 3d / 6, 3d / 6 };
+    public static final double[] hitProbabilitiesKickRightSide = { 0, 0, 0, 0, 0, 0, 1d, 0 };
+    public static final double[] hitProbabilitiesKickLeftSide = { 0, 0, 0, 0, 0, 0, 0, 1d };
+
+    /**
+     * returns the probability that hit_location (from class Mek) is hit when the Mek is attacked with weapons fire from
+     * facing attackedFromFacing, with 0 defined as forward
+     */
+    static double getHitProbability(int attackedFromFacing, int hit_location) {
+        if ((attackedFromFacing == 5) || (attackedFromFacing == 0) || (attackedFromFacing == 1) || (attackedFromFacing
+              == 3)) {
+            return hitProbabilitiesFront[hit_location];
+        }
+        if (attackedFromFacing == 2) {
+            return hitProbabilitiesRightSide[hit_location];
+        }
+        // assume attackedFromFacing==4
+        return hitProbabilitiesLeftSide[hit_location];
+    }
+
+    /**
+     * returns the probability that hit_location (from class Mek) is hit when the Mek is attacked with a punch from
+     * facing attackedFromFacing, with 0 defined as forward
+     */
+    static double getHitProbability_Punch(int attackedFromFacing, int hit_location) {
+        if ((attackedFromFacing == 5) || (attackedFromFacing == 0) || (attackedFromFacing == 1) || (attackedFromFacing
+              == 3)) {
+            return hitProbabilitiesPunchFront[hit_location];
+        }
+        if (attackedFromFacing == 2) {
+            return hitProbabilitiesPunchRightSide[hit_location];
+        }
+        // assume attackedFromFacing==4
+        return hitProbabilitiesPunchLeftSide[hit_location];
+    }
+
+    /**
+     * returns the probability that hit_location (from class Mek) is hit when the Mek is attacked with a kick from
+     * facing attackedFromFacing, with 0 defined as forward
+     */
+    static double getHitProbability_Kick(int attackedFromFacing, int hit_location) {
+        if ((attackedFromFacing == 5) || (attackedFromFacing == 0) || (attackedFromFacing == 1) || (attackedFromFacing
+              == 3)) {
+            return hitProbabilitiesKickFront[hit_location];
+        }
+        if (attackedFromFacing == 2) {
+            return hitProbabilitiesKickRightSide[hit_location];
+        }
+        // assume attackedFromFacing==4
+        return hitProbabilitiesKickLeftSide[hit_location];
+    }
+
+    /**
+     * Returns the probability that {@code hitLocation} (from class Mek) is hit for an attack resolved on the
+     * given hit-location table, from facing {@code attackedFromFacing} (0 = forward). Dispatches to the punch,
+     * kick, or full-body (weapons fire) table, so callers that resolve the table by relative elevation - see
+     * {@link PhysicalHitTable} - do not need to pick the array family themselves.
+     *
+     * @param hitTable           one of {@link ToHitData#HIT_PUNCH}, {@link ToHitData#HIT_KICK}, or any other
+     *                           value for the full-body table
+     * @param attackedFromFacing the facing the attack comes from, 0 defined as forward
+     * @param hitLocation        the Mek hit location index
+     *
+     * @return the probability of hitting that location on that table
+     */
+    static double getHitProbability(int hitTable, int attackedFromFacing, int hitLocation) {
+        return switch (hitTable) {
+            case ToHitData.HIT_PUNCH -> getHitProbability_Punch(attackedFromFacing, hitLocation);
+            case ToHitData.HIT_KICK -> getHitProbability_Kick(attackedFromFacing, hitLocation);
+            default -> getHitProbability(attackedFromFacing, hitLocation);
+        };
+    }
+
+    /**
+     * How likely a shot at a vehicle is to land in a location, following the standard vehicle hit table as
+     * {@link Tank#rollHitLocation(int, int)} rolls it: the side facing the shooter takes a 2-4 and 6-8, a 5 and a 9
+     * fall on other sides, and a 10-12 hits the turret, or the facing side of a vehicle with none.
+     *
+     * @param attackedFromFacing the direction of the shot relative to the vehicle's facing, 0 being straight ahead,
+     *                           read the same way as for a Mek: 5, 0 and 1 are the front, 2 the right, 3 the rear and
+     *                           4 the left
+     * @param location           a {@link Tank} location
+     * @param hasTurret          {@code true} if the vehicle has a turret
+     * @param hasDualTurret      {@code true} if it has two
+     *
+     * @return the probability of hitting that location
+     */
+    static double getVehicleHitProbability(int attackedFromFacing, int location, boolean hasTurret,
+          boolean hasDualTurret) {
+        int facingSide = switch (attackedFromFacing) {
+            case 2 -> Tank.LOC_RIGHT;
+            case 3 -> Tank.LOC_REAR;
+            case 4 -> Tank.LOC_LEFT;
+            default -> Tank.LOC_FRONT;
+        };
+        // a 5 and a 9, four rolls in 36 each, fall away from the facing side
+        int onFive = switch (facingSide) {
+            case Tank.LOC_RIGHT, Tank.LOC_LEFT -> Tank.LOC_FRONT;
+            case Tank.LOC_REAR -> Tank.LOC_LEFT;
+            default -> Tank.LOC_RIGHT;
+        };
+        int onNine = switch (facingSide) {
+            case Tank.LOC_RIGHT, Tank.LOC_LEFT -> Tank.LOC_REAR;
+            case Tank.LOC_REAR -> Tank.LOC_RIGHT;
+            default -> Tank.LOC_LEFT;
+        };
+        double probability = 0;
+        if (location == facingSide) {
+            // 2, 3, 4, 6, 7 and 8, plus 10-12 when there is no turret to take them
+            probability += (hasTurret ? 22d : 28d) / 36;
+        }
+        if (location == onFive) {
+            probability += 4d / 36;
+        }
+        if (location == onNine) {
+            probability += 4d / 36;
+        }
+        if (hasTurret) {
+            double turretRolls = 6d / 36;
+            if (!hasDualTurret) {
+                probability += (location == Tank.LOC_TURRET) ? turretRolls : 0;
+            } else {
+                // a d6 picks the turret: shifted 2 down from the front and 2 up from the rear, 3 or less is the second
+                double secondTurretOdds = switch (facingSide) {
+                    case Tank.LOC_FRONT -> 5d / 6;
+                    case Tank.LOC_REAR -> 1d / 6;
+                    default -> 3d / 6;
+                };
+                if (location == Tank.LOC_TURRET_2) {
+                    probability += turretRolls * secondTurretOdds;
+                } else if (location == Tank.LOC_TURRET) {
+                    probability += turretRolls * (1 - secondTurretOdds);
+                }
+            }
+        }
+        return probability;
+    }
+
+    /**
+     * If we roll on the critical hit table, how many criticalSlots do we expect to cause
+     */
+    static double getExpectedCriticalHitCount() {
+        return 0.611; // (9+2*5+3)/36
+    }
+}

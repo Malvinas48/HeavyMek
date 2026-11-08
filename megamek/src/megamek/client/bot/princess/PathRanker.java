@@ -1,0 +1,995 @@
+/*
+ * Copyright (C) 2000-2011 Ben Mazur (bmazur@sev.org)
+ * Copyright (C) 2011-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+package megamek.client.bot.princess;
+
+import static megamek.client.ui.SharedUtility.predictLeapDamage;
+import static megamek.client.ui.SharedUtility.predictLeapFallDamage;
+
+import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.ListIterator;
+import java.util.Map;
+import java.util.Optional;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import jakarta.annotation.Nullable;
+import megamek.client.bot.BotLogger;
+import megamek.client.bot.princess.UnitBehavior.BehaviorType;
+import megamek.client.ui.Messages;
+import megamek.client.ui.SharedUtility;
+import megamek.common.MPCalculationSetting;
+import megamek.common.board.Board;
+import megamek.common.board.Coords;
+import megamek.common.compute.Compute;
+import megamek.common.enums.MoveStepType;
+import megamek.common.equipment.enums.BombType;
+import megamek.common.game.Game;
+import megamek.common.moves.MovePath;
+import megamek.common.moves.MoveStep;
+import megamek.common.rolls.TargetRoll;
+import megamek.common.units.EjectedCrew;
+import megamek.common.units.Entity;
+import megamek.common.units.IBuilding;
+import megamek.common.units.Targetable;
+import megamek.logging.MMLogger;
+import org.apache.logging.log4j.Level;
+
+public abstract class PathRanker implements IPathRanker {
+    private final static MMLogger logger = MMLogger.create(PathRanker.class);
+    private static final BotLogger botLogger = new BotLogger();
+
+    // Fraction of a failed water-entry piloting roll treated as an acceptable (non-damaging) outcome: falling
+    // when wading only drops the unit prone in the water (minor damage, stand next turn) rather than a real
+    // fall. The forgiveness is scaled by water depth - a fall in a shallow ford is nearly harmless, but is
+    // progressively worse in deeper water (where the separately-scored submerged-location breach hazard also
+    // applies). This keeps Princess willing to wade a shallow river to engage instead of pacing at the bank
+    // (issue #7627) without making her reckless in deep water.
+    private static final double WATER_FALL_FORGIVENESS_DEPTH_1 = 0.95;
+    private static final double WATER_FALL_FORGIVENESS_PER_DEPTH = 0.20;
+    private static final double WATER_FALL_FORGIVENESS_FLOOR = 0.30;
+    // Matches the "entering Depth N Water" piloting-roll description built in Entity.checkWaterMove.
+    private static final Pattern WATER_ENTRY_DEPTH_PATTERN = Pattern.compile("entering depth (\\d+)");
+    // Piloting-roll descriptions emitted for gravity overspeed (see Entity.checkMovedTooFast and
+    // SharedUtility.getPSRList). Matched lower-cased to add the self-inflicted leg damage into a path's
+    // expected damage taken. Kept as literals because the engine emits them as raw strings, not i18n keys.
+    private static final String PSR_DESC_GRAVITY_TOO_FAST = "used more mps than at 1g possible";
+    private static final String PSR_DESC_GRAVITY_HIGH_JUMP = "jumped in high gravity";
+    // TODO: Introduce PathRankerCacheHelper class that contains "global" path
+    // ranker state
+    // TODO: Introduce FireControlCacheHelper class that contains "global" Fire
+    // Control state
+    // PathRanker classes should be pretty stateless, except pointers to princess
+    // and such
+
+    /**
+     * The possible path ranker types. If you're adding a new one, add it here then make sure to add it to
+     * Princess.InitializePathRankers
+     */
+    public enum PathRankerType {
+        Basic,
+        Infantry,
+        NewtonianAerospace,
+        Utility,
+        /**
+         * Airborne aerospace units flying in an atmosphere, on either a ground mapsheet or a low-altitude
+         * map. Distinct from {@link #NewtonianAerospace}, which covers vector movement instead.
+         *
+         * <p>Princess registers its ordinary {@link BasicPathRanker} here, so this slot changes nothing for
+         * it; the slot exists so that CASPAR can replace atmospheric aerospace movement on its own.</p>
+         */
+        Aerospace
+    }
+
+    /**
+     * The posture already resolved for this board this round, or {@code null} when none has been.
+     *
+     * <p>Read-only by contract: implementations must not resolve a posture that has not been asked for, since
+     * resolving announces it. Overridden by {@link BasicPathRanker}; there is nothing to report here.</p>
+     *
+     * @param game    the current game
+     * @param boardId the board to report on
+     *
+     * @return the resolved posture, or {@code null}
+     */
+    protected @Nullable CombatPosture resolvedPostureFor(Game game, int boardId) {
+        return null;
+    }
+
+    /**
+     * Whether each of this bot's units is fighting offensively or defensively, for the log.
+     *
+     * <p>Both values are read as already decided, never computed here. A unit that has not been evaluated yet
+     * this turn reports nothing rather than an answer invented for the logger's benefit.</p>
+     *
+     * @param game the current game
+     *
+     * @return entity id to its logged context, for this bot's units only
+     */
+    private Map<Integer, BotLogger.UnitContext> ownUnitContexts(Game game) {
+        Map<Integer, BotLogger.UnitContext> contexts = new HashMap<>();
+        UnitBehavior behaviorTracker = getOwner().getUnitBehaviorTracker();
+        for (Entity ownedUnit : getOwner().getEntitiesOwned()) {
+            UnitBehavior.BehaviorType behavior = behaviorTracker.getCachedBehaviorType(ownedUnit);
+            CombatPosture posture = resolvedPostureFor(game, ownedUnit.getBoardId());
+            contexts.put(ownedUnit.getId(),
+                  new BotLogger.UnitContext(behavior == null ? "" : behavior.name(),
+                        posture == null ? "" : posture.name()));
+        }
+        return contexts;
+    }
+
+    private final Princess owner;
+
+    public PathRanker(Princess princess) {
+        owner = princess;
+    }
+
+    protected abstract RankedPath rankPath(MovePath path, Game game, int maxRange,
+          double fallTolerance, List<Entity> enemies,
+          Coords friendsCoords);
+
+    @Override
+    public TreeSet<RankedPath> rankPaths(List<MovePath> movePaths, Game game, int maxRange,
+          double fallTolerance, List<Entity> enemies,
+          List<Entity> friends) {
+        // No point in ranking an empty list.
+        if (movePaths.isEmpty()) {
+            return new TreeSet<>();
+        }
+
+        // the cached path probability data is really only relevant for one iteration
+        // through this method
+        getPathRankerState().getPathSuccessProbabilities().clear();
+
+        // Let's try to whittle down this list.
+        List<MovePath> validPaths = validatePaths(movePaths, game, maxRange, fallTolerance);
+        logger.debug("Validated {} out of {} possible paths.", validPaths.size(), movePaths.size());
+
+        // If the heat map of friendly activity has sufficient data, use the nearest hot
+        // spot as
+        // the anchor point
+        Coords allyCenter = owner.getFriendlyHotSpot(movePaths.getFirst().getEntity().getPosition());
+        if (allyCenter == null) {
+            allyCenter = this.calculateAlliesCenter(movePaths.getFirst().getEntity().getId(), friends, game);
+        }
+
+        TreeSet<RankedPath> returnPaths = new TreeSet<>(Collections.reverseOrder());
+
+        try {
+            final BigDecimal numberPaths = new BigDecimal(validPaths.size());
+            BigDecimal count = BigDecimal.ZERO;
+            BigDecimal interval = new BigDecimal(5);
+            boolean pathsHaveExpectedDamage = false;
+            for (MovePath path : validPaths) {
+                try {
+                    count = count.add(BigDecimal.ONE);
+
+                    RankedPath rankedPath = rankPath(path, game, maxRange, fallTolerance, enemies, allyCenter);
+
+                    returnPaths.add(rankedPath);
+
+                    // we want to keep track of if any of the paths we've considered have some kind
+                    // of damage potential
+                    pathsHaveExpectedDamage |= (rankedPath.getExpectedDamage() > 0);
+
+                    BigDecimal percent = count.divide(numberPaths, 2, RoundingMode.DOWN).multiply(new BigDecimal(100))
+                          .round(new MathContext(0, RoundingMode.DOWN));
+                    if (percent.compareTo(interval) >= 0) {
+                        if (logger.isLevelLessSpecificThan(Level.INFO)) {
+                            getOwner().sendChat("... " + percent.intValue() + "% complete.");
+                        }
+                        interval = percent.add(new BigDecimal(5));
+                    }
+                } catch (Exception e) {
+                    logger.error(e, "{} while processing {}", e.getMessage(), path);
+                }
+            }
+            Entity mover = movePaths.getFirst().getEntity();
+            UnitBehavior behaviorTracker = getOwner().getUnitBehaviorTracker();
+            boolean noDamageButCanDoDamage = !pathsHaveExpectedDamage
+                  && (FireControl.getMaxDamageAtRange(mover, 1, false, false) > 0);
+
+            // if we're trying to fight, but aren't going to be doing any damage no matter
+            // how we move
+            // then let's try to get closer
+            if (noDamageButCanDoDamage
+                  && (behaviorTracker.getBehaviorType(mover, getOwner()) == BehaviorType.Engaged)) {
+                behaviorTracker.overrideBehaviorType(mover, BehaviorType.MoveToContact);
+                return rankPaths(getOwner().getMovePathsAndSetNecessaryTargets(mover, true),
+                      game, maxRange, fallTolerance, enemies, friends);
+            }
+        } catch (Exception exception) {
+            logger.error(exception, exception.getMessage());
+            return returnPaths;
+        }
+        botLogger.append(game, true, ownUnitContexts(game));
+        // log at most 500 paths
+        int i = 0;
+        int maxRankedPaths = Math.max(500, returnPaths.size());
+        for (RankedPath rankedPath : returnPaths) {
+            if (maxRankedPaths == i) {
+                break;
+            }
+            botLogger.append(rankedPath, i);
+            i++;
+        }
+
+        logSprintDecisionSummary(returnPaths);
+
+        return returnPaths;
+    }
+
+    /**
+     * Logs a one-line, debug-level summary of the sprint decision for a unit's move: whether the best-ranked path
+     * sprints, how many candidate paths end in a sprint, how many of those were penalized for ending inside enemy
+     * weapon range, and the best sprint vs. non-sprint ranks. This makes the bot's sprint reasoning visible without
+     * wading through per-path trace output; the full per-path detail is in the BotLogger TSV columns
+     * ({@code isSprinting}, {@code sprintExposurePenalty}, {@code sprintThreatEnemyId}, {@code sprintThreatDistance},
+     * {@code sprintThreatRange}) and each ranked path's reason string.
+     *
+     * @param rankedPaths the ranked paths for this unit's move, best first
+     */
+    private void logSprintDecisionSummary(TreeSet<RankedPath> rankedPaths) {
+        if (rankedPaths.isEmpty() || !logger.isLevelLessSpecificThan(Level.INFO)) {
+            return;
+        }
+
+        int sprintPathCount = 0;
+        int penalizedPathCount = 0;
+        RankedPath bestSprintPath = null;
+        RankedPath bestNonSprintPath = null;
+
+        for (RankedPath rankedPath : rankedPaths) {
+            if (BasicPathRanker.isSprintingPath(rankedPath.getPath())) {
+                sprintPathCount++;
+                Double sprintExposurePenalty = rankedPath.getScores().get("sprintExposurePenalty");
+                if ((sprintExposurePenalty != null) && (sprintExposurePenalty > 0)) {
+                    penalizedPathCount++;
+                }
+                if (bestSprintPath == null) {
+                    bestSprintPath = rankedPath;
+                }
+            } else if (bestNonSprintPath == null) {
+                bestNonSprintPath = rankedPath;
+            }
+        }
+
+        RankedPath bestPath = rankedPaths.first();
+        // The score breakdown (getReason) answers "why did this unit move here?" - include it at debug so a playtest
+        // can see the winning path's factors without enabling the per-path trace flood.
+        logger.debug("[Move] {}: best path ends {} ({}, rank {}); {} of {} candidate paths sprint, "
+                    + "{} sprint paths penalized for ending in enemy weapon range; "
+                    + "best sprint rank {}, best non-sprint rank {}. Breakdown: {}",
+              bestPath.getPath().getEntity().getDisplayName(),
+              bestPath.getPath().getFinalCoords(),
+              BasicPathRanker.isSprintingPath(bestPath.getPath()) ? "SPRINTS" : "does not sprint",
+              bestPath.getRank(),
+              sprintPathCount,
+              rankedPaths.size(),
+              penalizedPathCount,
+              (bestSprintPath == null) ? "n/a" : bestSprintPath.getRank(),
+              (bestNonSprintPath == null) ? "n/a" : bestNonSprintPath.getRank(),
+              bestPath.getReason());
+    }
+
+    List<MovePath> validatePaths(List<MovePath> startingPathList, Game game, int maxRange,
+          double fallTolerance) {
+        if (startingPathList.isEmpty()) {
+            // Nothing to validate here, might as well return the empty list
+            // straight away.
+            return startingPathList;
+        }
+
+        Entity mover = startingPathList.getFirst().getEntity();
+
+        Targetable closestTarget = findClosestEnemy(mover, mover.getPosition(), game);
+        int startingTargetDistance = (closestTarget == null) ? Integer.MAX_VALUE
+              : closestTarget.getPosition().distance(mover.getPosition());
+        boolean hasNoEnemyAvailable = (closestTarget == null);
+        List<MovePath> returnPaths = new ArrayList<>(startingPathList.size());
+        // Artillery can fire indirectly from well beyond its direct-fire reach, so a gun out there is still in range
+        int engagementRange = ArtilleryReach.engagementRange(game, mover, maxRange);
+        boolean inRange = engagementRange >= startingTargetDistance;
+
+        boolean needToUnjamRAC = mover.canUnjamRAC();
+        int walkMP = mover.getWalkMP();
+
+        for (MovePath path : startingPathList) {
+            // just in case
+            if ((path == null) || !path.isMoveLegal()) {
+                continue;
+            }
+
+            // If there is deployment steps, we validate this differently
+            boolean isAirborneAeroOnGroundMap = mover.isAirborneAeroOnGroundMap(path.contains(MoveStepType.DEPLOY));
+
+            logger.trace("Validating path {}", path);
+            // if we are an aero unit on the ground map, we want to discard paths that keep
+            // us at altitude 1 with no bombs
+            if (isAirborneAeroOnGroundMap) {
+                // if we have no bombs, we want to make sure our altitude is above 1
+                // if we do have bombs, we may consider altitude bombing (in the future)
+                if (path.getEntity().getBombs(BombType.F_GROUND_BOMB).isEmpty()
+                      && (path.getFinalAltitude() < 2)) {
+                    logger.trace("INVALID: No bombs but at altitude 1. No way.");
+                    continue;
+                }
+            }
+
+            Coords finalCoords = path.getFinalCoords();
+
+            // Make sure I'm trying to get/stay in range of a target.
+            // Skip this part if I'm an aero on the ground map, as it's kind of irrelevant
+            // also skip this part if I'm attempting to retreat, as engagement is not the
+            // point here
+            if (!isAirborneAeroOnGroundMap && !getOwner().wantsToFallBack(mover) && !hasNoEnemyAvailable) {
+                Targetable closestToEnd = findClosestEnemy(mover, finalCoords, game);
+                var validation = validRange(finalCoords, closestToEnd, startingTargetDistance, engagementRange,
+                      inRange);
+                if (!validation) {
+                    logger.trace("Invalid range to target.");
+                    continue;
+                }
+            }
+
+            // Don't move on/through buildings that will not support our weight.
+            if (willBuildingCollapse(path, game)) {
+                logger.trace("INVALID: Building in path will collapse.");
+                continue;
+            }
+
+            // Skip any path where I am too likely to fail my piloting roll.
+            double chance = getMovePathSuccessProbability(path);
+            if (chance < fallTolerance) {
+                logger.trace("INVALID: Too likely to fall on my face.");
+                continue;
+            }
+
+            // first crack at logic involving unjamming RACs: just do it
+            if (needToUnjamRAC && ((path.getMpUsed() > walkMP) || path.isJumping())) {
+                logger.trace("INADVISABLE: Want to unjam autocannon but path involves running or jumping");
+                continue;
+            }
+
+            // If all the above checks have passed, this is a valid path.
+            logger.trace("VALID");
+            returnPaths.add(path);
+
+        }
+
+        // If we've eliminated all valid paths, let's try to pick out a long range path
+        // instead
+        if (returnPaths.isEmpty()) {
+            return getOwner().getMovePathsAndSetNecessaryTargets(mover, true);
+        }
+
+        return returnPaths;
+    }
+
+    /**
+     * Returns the best path of a list of ranked paths.
+     *
+     * @param ps The list of ranked paths to process
+     *
+     * @return "Best" out of those paths
+     */
+    @Override
+    public @Nullable RankedPath getBestPath(TreeSet<RankedPath> ps) {
+        return ps.isEmpty() ? null : ps.first();
+    }
+
+    /**
+     * Performs initialization to help speed later calls of rankPath for this unit on this turn. Rankers that extend
+     * this class should override this function
+     */
+    @Override
+    public void initUnitTurn(Entity unit, Game game) {
+    }
+
+    @Override
+    public Targetable findClosestEnemy(Entity me, Coords position, Game game) {
+        return findClosestEnemy(me, position, game, true);
+    }
+
+    /**
+     * Find the closest enemy to a unit with a path
+     */
+    @Override
+    public Targetable findClosestEnemy(Entity me, Coords position, Game game,
+          boolean includeStrategicTargets, int minDistance) {
+        int range = Integer.MAX_VALUE;
+        Targetable closest = null;
+        int crewRange = Integer.MAX_VALUE;
+        Entity closestCrew = null;
+        List<Entity> enemies = getOwner().getEnemyEntities();
+        var ignoredTargets = owner.getBehaviorSettings().getIgnoredUnitTargets();
+        var priorityTargets = getOwner().getPriorityUnitTargets();
+        for (Entity enemy : enemies) {
+            // For now, skip anything not on the same map
+            if (!game.onTheSameBoard(me, enemy)) {
+                continue;
+            }
+
+            // Skip airborne aero units as they're further away than they seem and hard to catch.
+            // Also, skip withdrawing enemy bot units that are not priority targets skip ignored units
+            if (enemy.isAirborneAeroOnGroundMap()
+                  || (!priorityTargets.contains(enemy.getId())
+                  && getOwner().getHonorUtil().isEnemyBroken(enemy.getId(), enemy.getOwnerId(),
+                  getOwner().getForcedWithdrawal()))
+                  || ignoredTargets.contains(enemy.getId())) {
+                continue;
+            }
+
+            // If a unit has not moved, assume it will move away from me.
+            int unmovedDistanceModifier = 0;
+            if (enemy.isSelectableThisTurn() && !enemy.isImmobile()) {
+                unmovedDistanceModifier = enemy.getWalkMP();
+            }
+
+            // "Closest" is measured by the adjusted distance (an unmoved enemy is treated as farther, since it can
+            // still move away), so store the same adjusted value we compare against - not the raw distance. The
+            // minDistance filter is a "not within N raw hexes" gate (e.g. the not-zero-distance facing target), so
+            // it is tested against the raw hex distance, otherwise a same-hex enemy could pass it via its movement
+            // allowance.
+            int distance = position.distance(enemy.getPosition());
+            int adjustedDistance = distance + unmovedDistanceModifier;
+            if (distance < minDistance) {
+                continue;
+            }
+
+            // Ejected crews are a fallback only, unless ordered to hunt them. They are no threat and fire control
+            // already scores them as poor targets, so letting one count as the closest enemy pulls whole lances away
+            // from the fight to surround it (#9194). But a force reduced to ejected crews has not lost, so with no
+            // other enemy left the nearest crew is still returned, and the bot keeps advancing.
+            if ((enemy instanceof EjectedCrew) && !priorityTargets.contains(enemy.getId())) {
+                if (adjustedDistance < crewRange) {
+                    crewRange = adjustedDistance;
+                    closestCrew = enemy;
+                }
+                continue;
+            }
+
+            if (adjustedDistance < range) {
+                range = adjustedDistance;
+                closest = enemy;
+            }
+        }
+
+        // if specified, we also consider strategic targets
+        if (includeStrategicTargets) {
+            for (Targetable t : getOwner().getFireControlState().getAdditionalTargets()) {
+                int distance = position.distance(t.getPosition());
+                if (distance < range) {
+                    range = distance;
+                    closest = t;
+                }
+            }
+        }
+
+        if ((closest == null) && (closestCrew != null)) {
+            logger.trace("findClosestEnemy: only ejected crews left, using {} for {}", closestCrew.getDisplayName(),
+                  me.getDisplayName());
+            return closestCrew;
+        }
+        return closest;
+    }
+
+    /**
+     * Calculates the probability that a unit can successfully complete the given movement path.
+     * <p>
+     * This method evaluates all piloting skill rolls required along the path and computes the combined probability of
+     * passing all of them. It accounts for:
+     * <ul>
+     *   <li>Piloting skill rolls from difficult terrain, elevation changes, etc.</li>
+     *   <li>MASC failure chances if MASC is activated during the move</li>
+     *   <li>Supercharger failure chances if a supercharger is used</li>
+     * </ul>
+     * <p>
+     * The method skips "getting up" and "careful stand" piloting rolls as these are handled
+     * separately when evaluating immobile status. Results are cached to avoid redundant
+     * calculations during path evaluation.
+     * <p>
+     * The probability is expressed as a value between 0.0 (guaranteed failure) and
+     * 1.0 (guaranteed success).
+     *
+     * @param movePath The movement path to evaluate
+     *
+     * @return The probability (0.0 to 1.0) that all required piloting rolls will succeed
+     */
+    protected double getMovePathSuccessProbability(MovePath movePath) {
+        // introduced a caching mechanism, as the success probability was being
+        // calculated at least twice
+        if (getPathRankerState().getPathSuccessProbabilities().containsKey(movePath.getKey())) {
+            return getPathRankerState().getPathSuccessProbabilities().get(movePath.getKey());
+        }
+
+        MovePath pathCopy = movePath.clone();
+        List<TargetRoll> pilotingRolls = getPSRList(pathCopy);
+        double successProbability = 1.0;
+        logger.trace("Calculating Move Path Success for {}", pathCopy);
+
+        for (TargetRoll roll : pilotingRolls) {
+            String rollDescription = roll.getDesc().toLowerCase();
+            // Skip the getting up check. That's handled when checking for being immobile.
+            if (rollDescription.contains("getting up")) {
+                continue;
+            } else if (rollDescription.contains("careful stand")) {
+                continue;
+            }
+            boolean naturalAptPilot = movePath.getEntity().isUseNaturalAptitudePiloting();
+            if (naturalAptPilot) {
+                logger.trace("Pilot has Natural Aptitude Piloting");
+            }
+
+            double odds = Compute.oddsAbove(roll.getValue(), naturalAptPilot) / 100d;
+            // A failed water-entry roll only drops the unit prone in the water rather than causing a damaging
+            // fall, so treat most of that chance as an acceptable outcome - more so the shallower the water.
+            // Otherwise an 8% wet-fall reads as a catastrophe (fall chance x fallShame) and Princess refuses to
+            // wade even a shallow river (issue #7627).
+            if (rollDescription.contains("entering depth")) {
+                double forgiveness = waterFallForgiveness(waterEntryDepth(rollDescription));
+                odds += (1.0 - odds) * forgiveness;
+            }
+            logger.trace("Odds above {} = {}", roll.getValue(), odds);
+            successProbability *= odds;
+        }
+
+        // Account for MASC
+        if (pathCopy.hasActiveMASC()) {
+            int target = pathCopy.getEntity().getMASCTarget();
+            // TODO : Does Natural Aptitude Piloting apply to this? I assume not.
+            double odds = Compute.oddsAbove(target) / 100d;
+            logger.trace("MASC target {}, odds = {}", target, odds);
+            successProbability *= odds;
+        }
+        // Account for Supercharger
+        if (pathCopy.hasActiveSupercharger()) {
+            int target = pathCopy.getEntity().getSuperchargerTarget();
+            // todo Does Natural Aptitude Piloting apply to this? I assume not.
+            double odds = Compute.oddsAbove(target) / 100d;
+            logger.trace("Supercharger target {}, odds = {}", target, odds);
+            successProbability *= odds;
+        }
+        logger.trace("Success probability = {}", successProbability);
+        getPathRankerState().getPathSuccessProbabilities().put(movePath.getKey(), successProbability);
+
+        return successProbability;
+    }
+
+    /**
+     * The fraction of a failed water-entry piloting roll treated as an acceptable (non-damaging) outcome,
+     * scaled by water depth. A fall while wading only drops the unit prone in the water, which is nearly
+     * harmless in a shallow ford but progressively worse in deeper water; the forgiveness therefore shrinks
+     * as depth grows and never drops below {@link #WATER_FALL_FORGIVENESS_FLOOR}.
+     *
+     * @param waterDepth the depth (in levels) of the water being entered
+     *
+     * @return the forgiveness fraction, between {@link #WATER_FALL_FORGIVENESS_FLOOR} and
+     *       {@link #WATER_FALL_FORGIVENESS_DEPTH_1}
+     */
+    private static double waterFallForgiveness(int waterDepth) {
+        int depthBeyondFirst = Math.max(0, waterDepth - 1);
+        double forgiveness = WATER_FALL_FORGIVENESS_DEPTH_1 - (depthBeyondFirst * WATER_FALL_FORGIVENESS_PER_DEPTH);
+        return Math.max(WATER_FALL_FORGIVENESS_FLOOR, forgiveness);
+    }
+
+    /**
+     * Extracts the water depth from a water-entry piloting-roll description of the form
+     * {@code "entering Depth N Water"} (see {@code Entity.checkWaterMove}).
+     *
+     * @param rollDescription the lower-cased roll description
+     *
+     * @return the parsed depth, or {@code 1} (shallowest) if the description cannot be parsed
+     */
+    private static int waterEntryDepth(String rollDescription) {
+        Matcher matcher = WATER_ENTRY_DEPTH_PATTERN.matcher(rollDescription);
+        if (matcher.find()) {
+            try {
+                return Integer.parseInt(matcher.group(1));
+            } catch (NumberFormatException numberFormatException) {
+                // The capture is all digits, so this only happens on an implausibly large value that overflows
+                // an int; treat it as the shallowest depth rather than failing.
+                return 1;
+            }
+        }
+        return 1;
+    }
+
+    /**
+     * Estimates the most expected damage that a path could cause, given the pilot skill of the path ranker and various
+     * conditions.
+     * <p>
+     * XXX Sleet01: add fall pilot damage and skid damage calcs (low-/high-gravity overspeed leg damage is
+     * handled below via {@link #predictGravityOverspeedDamage}).
+     */
+    protected double calculateMovePathPSRDamage(Entity movingEntity, MovePath path) {
+        double damage = 0.0;
+
+        List<TargetRoll> pilotingRolls = getPSRList(path);
+        for (TargetRoll roll : pilotingRolls) {
+            // Have to use if/else as switch/case won't allow runtime loading of strings without SDK 17 LTS support
+            String description = roll.getLastPlainDesc().toLowerCase();
+            if (
+                  description.contains(Messages.getString("TacOps.leaping.leg_damage"))
+            ) {
+                damage += predictLeapDamage(movingEntity, roll);
+            } else if (
+                  description.contains(Messages.getString("TacOps.leaping.fall_damage"))
+            ) {
+                damage += predictLeapFallDamage(movingEntity, roll);
+            } else if (
+                  description.contains(PSR_DESC_GRAVITY_TOO_FAST)
+                        || description.contains(PSR_DESC_GRAVITY_HIGH_JUMP)
+            ) {
+                damage += predictGravityOverspeedDamage(movingEntity, path, roll);
+            }
+        }
+
+        return damage;
+    }
+
+    /**
+     * Predicts the self-inflicted leg internal-structure damage Princess would take if she failed the gravity
+     * "overspeed" piloting roll on this path. On low-gravity worlds a unit can run or jump farther than its 1G
+     * rating allows, and on high-gravity worlds a jump that costs it walk MP triggers a roll; failing either
+     * deals extreme-gravity damage to the legs (1 point per MP over the 1G limit for ground or low-gravity
+     * jumps, or {@code (1G walk MP - gravity walk MP) / 2} for a high-gravity jump).
+     *
+     * <p>Unlike the leaping rolls, the gravity roll does not encode the damage magnitude in its value (see
+     * {@link Entity#checkMovedTooFast}), so it is recomputed from the path's final step. The result is
+     * weighted by the chance of failing the roll, matching {@code predictLeapDamage}.</p>
+     *
+     * @param movingEntity the unit whose path is being ranked
+     * @param path         the candidate path
+     * @param roll         the gravity overspeed piloting roll from {@link #getPSRList(MovePath)}
+     *
+     * @return the odds-weighted expected leg damage, or {@code 0} if the path does not actually overspeed
+     */
+    private double predictGravityOverspeedDamage(Entity movingEntity, MovePath path, TargetRoll roll) {
+        MoveStep lastStep = path.getLastStep();
+        if (lastStep == null) {
+            return 0.0;
+        }
+
+        String description = roll.getLastPlainDesc().toLowerCase();
+        int overspeedMP;
+        if (description.contains(PSR_DESC_GRAVITY_HIGH_JUMP)) {
+            // High-gravity jump: half the walk MP lost to gravity (TO:AR gravity rules).
+            overspeedMP = (movingEntity.getWalkMP(MPCalculationSetting.NO_GRAVITY) - movingEntity.getWalkMP()) / 2;
+        } else if (path.isJumping()) {
+            // Low-gravity jump overspeed: MP used beyond the 1G jump rating. A mechanical jump booster uses
+            // its own no-gravity rating, matching the server extreme-gravity damage calculation.
+            int noGravityJumpMP = lastStep.isUsingMekJumpBooster()
+                  ? movingEntity.getMechanicalJumpBoosterMP(MPCalculationSetting.NO_GRAVITY)
+                  : movingEntity.getJumpMP(MPCalculationSetting.NO_GRAVITY);
+            overspeedMP = lastStep.getMpUsed() - noGravityJumpMP;
+        } else {
+            // Low-gravity ground overspeed: MP used beyond the 1G running limit. The server's extreme-gravity
+            // damage uses getRunningGravityLimit() directly (no pavement/road adjustment), so mirror it.
+            overspeedMP = lastStep.getMpUsed() - movingEntity.getRunningGravityLimit();
+        }
+
+        if (overspeedMP <= 0) {
+            return 0.0;
+        }
+
+        // Each excess MP costs 1 point of leg internal structure on a failed roll; weight by failure chance.
+        double failureProbability = 1.0 - (Compute.oddsAbove(roll.getValue(), false) / 100.0);
+        return overspeedMP * failureProbability;
+    }
+
+    protected List<TargetRoll> getPSRList(MovePath path) {
+        return SharedUtility.getPSRList(path);
+    }
+
+    @Override
+    public int distanceToHomeEdge(Coords position, int boardId, CardinalEdge homeEdge, Game game) {
+        int width = game.getBoard(boardId).getWidth();
+        int height = game.getBoard(boardId).getHeight();
+
+        int distance;
+        switch (homeEdge) {
+            case NORTH: {
+                distance = position.getY();
+                break;
+            }
+            case SOUTH: {
+                distance = height - position.getY() - 1;
+                break;
+            }
+            case WEST: {
+                distance = position.getX();
+                break;
+            }
+            case EAST: {
+                distance = width - position.getX() - 1;
+                break;
+            }
+            default: {
+                logger.warn("Invalid home edge. Defaulting to NORTH.");
+                distance = position.getY();
+            }
+        }
+
+        return distance;
+    }
+
+    /**
+     * How far a position is from where a unit on a movement mission is going: its current waypoint when it follows
+     * waypoints, otherwise its home edge. Before issue #9038 a unit following a waypoint was scored by its distance to
+     * the home edge, which is NORTH when no edge is set, so a waypoint anywhere else was pulled toward the north edge.
+     *
+     * <p>Anywhere within {@link Princess#DISTANCE_TO_WAYPOINT} of the waypoint counts as arrived, matching the point at
+     * which the bot moves on to the next waypoint. Further out, the distance is the movement points to the waypoint by
+     * the cheapest route the unit can take ({@link WaypointDistanceField}), so a unit behind a lake or in a dead-end
+     * street prefers the way round over the shore facing the waypoint (issue #7615). A unit on the ground heading for
+     * its home edge is measured the same way, to the nearest hex of the edge. Where no route is known, the
+     * straight-line distance stands in.</p>
+     *
+     * @param movingUnit the unit on the mission
+     * @param position   the position to measure from
+     * @param boardId    the board of that position
+     * @param game       the game
+     *
+     * @return the distance; {@code 0} means the unit has arrived
+     */
+    protected int distanceToDestination(Entity movingUnit, Coords position, int boardId, Game game) {
+        Optional<Coords> waypoint = getOwner().getUnitBehaviorTracker().getActiveWaypoint(movingUnit, getOwner());
+        if (waypoint.isPresent() && (boardId == movingUnit.getBoardId())) {
+            // Score the way still to go along the whole route, not just to the next waypoint. Otherwise every hex
+            // near a waypoint scores as "arrived", and a unit with movement to spare runs a loop past it to bank
+            // defence rather than heading on to the next one (HammerGS's playtest, 2026-09-26).
+            List<Coords> route = movingUnit.getUnitOrders().getRoute();
+            Coords target = waypoint.get();
+            boolean isRouteHead = !route.isEmpty() && route.get(0).equals(target);
+            // a waypoint set to hold is the whole goal until the unit stands on it: scoring the leg beyond it would
+            // pull the unit past the hex it has to stop on
+            boolean isHeadingForHold = getOwner().getUnitOrdersFollower().isHeadingForHold(movingUnit);
+            Coords nextWaypoint = (isRouteHead && (route.size() > 1) && !isHeadingForHold) ? route.get(1) : null;
+            // a formation slot, a waypoint set to hold and a formation leader's last waypoint count as reached only on
+            // the hex; any other waypoint within DISTANCE_TO_WAYPOINT
+            int arrivalRadius = getOwner().getUnitOrdersFollower().arrivalRadius(movingUnit);
+            boolean hasArrived = position.distance(target) <= arrivalRadius;
+            if (nextWaypoint != null) {
+                if (hasArrived) {
+                    return costToward(movingUnit, nextWaypoint, position, 0);
+                }
+                return costToward(movingUnit, target, position, arrivalRadius)
+                      + costToward(movingUnit, nextWaypoint, target, 0);
+            }
+            return hasArrived ? 0 : costToward(movingUnit, target, position, arrivalRadius);
+        }
+        CardinalEdge homeEdge = getOwner().getHomeEdge(movingUnit);
+        // A unit on the ground heading for an edge is scored by the way it can really go. By rows to the edge alone,
+        // every first step round a lake scores worse than standing still, and the unit freezes on the shore
+        // (HammerGS's playtest, 2026-09-26). Airborne units keep the straight line.
+        boolean isOnGround = !movingUnit.isAirborne() && !movingUnit.isAirborneVTOLorWIGE();
+        if (isOnGround && (boardId == movingUnit.getBoardId())) {
+            int edgeCost = getOwner().getUnitOrdersFollower().edgeCostFrom(movingUnit, homeEdge, position);
+            if (edgeCost != WaypointDistanceField.UNREACHABLE) {
+                return edgeCost;
+            }
+        }
+        return distanceToHomeEdge(position, boardId, homeEdge, game);
+    }
+
+    /**
+     * @return the movement points from the position to the target by the cheapest route, or the straight-line
+     *       distance less the arrival radius where no route is known
+     */
+    private int costToward(Entity movingUnit, Coords target, Coords position, int arrivalRadius) {
+        int routeCost = getOwner().getUnitOrdersFollower().routeCostFrom(movingUnit, target, position);
+        if (routeCost == WaypointDistanceField.UNREACHABLE) {
+            return Math.max(0, position.distance(target) - arrivalRadius);
+        }
+        return routeCost;
+    }
+
+    private boolean validRange(Coords finalCoords, Targetable target, int startingTargetDistance,
+          int maxRange, boolean inRange) {
+        if (target == null) {
+            return false;
+        }
+
+        // If I am not currently in range, discard any path that takes me further away
+        // from my target.
+        int finalDistanceToTarget = finalCoords.distance(target.getPosition());
+        if (!inRange) {
+            if (finalDistanceToTarget > startingTargetDistance) {
+                logger.trace("INVALID: Not in range and moving further away.");
+                return false;
+            }
+        } else { // If I am in range, discard any path that takes me out of range.
+            if (finalDistanceToTarget > maxRange) {
+                logger.trace("INVALID: In range and moving out of range.");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Check the path being moved to see if there is a danger of building collapse. Allows a margin of error of 10 tons
+     * in case someone decides to shoot at the building. If jumping, only the landing point is checked. For all other
+     * move types, the entire path is checked.
+     * TODO : reread the rules on basement collapse
+     * TODO : skip basement check if random basement option is turned off
+     * TODO : incorporate test for building damage just from moving through building
+     *
+     * @param path The {@link MovePath} being traversed.
+     * @param game The current {@link Game}
+     *
+     * @return True if there is a building in our path that might collapse.
+     */
+    private boolean willBuildingCollapse(MovePath path, Game game) {
+        // airborne aircraft cannot collapse buildings; landed dropships can, so check isAirborne() not isAero()
+        if (path.getEntity().isAirborne() || path.getEntity().hasETypeFlag(Entity.ETYPE_VTOL)) {
+            return false;
+        }
+
+        // If we're jumping onto a building, make sure it can support our weight.
+        if (path.isJumping()) {
+            final Coords finalCoords = path.getFinalCoords();
+            Optional<IBuilding> building = game.getBuildingAt(finalCoords, path.getFinalBoardId());
+            if (building.isEmpty()) {
+                return false;
+            }
+
+            // Give ourselves a 10-ton margin of error in case someone shoots at the
+            // building.
+            double mass = path.getEntity().getWeight() + 10;
+
+            // Add the mass of anyone else standing in/on this building.
+            mass += owner.getMassOfAllInBuilding(game, finalCoords, path.getFinalBoardId());
+
+            return (mass > building.get().getCurrentCF(finalCoords));
+        }
+
+        // If we're not jumping, check each building to see if it will collapse if it
+        // has a basement.
+        final Entity entity = path.getEntity();
+        final double mass = entity.getWeight() + 10;
+        // Secondary positions are absolute coords based on the entity's current position.
+        // For multi-hex units (e.g. Dropships), key 0 is the center and keys 1-N are the
+        // surrounding hexes. For single-hex units, this map is empty.
+        final Map<Integer, Coords> secondaryPositions = entity.getSecondaryPositions();
+        final Coords entityCenter = entity.getPosition();
+        final ListIterator<MoveStep> steps = path.getSteps();
+        while (steps.hasNext()) {
+            final MoveStep step = steps.next();
+
+            // Determine which hexes this entity occupies at this step position.
+            // For multi-hex units, translate each secondary position by the step delta.
+            Collection<Coords> occupiedHexes;
+            if (secondaryPositions.isEmpty()) {
+                occupiedHexes = List.of(step.getPosition());
+            } else {
+                final Coords stepCenter = step.getPosition();
+                occupiedHexes = secondaryPositions.values().stream()
+                      .map(sec -> stepCenter.add(sec.subtract(entityCenter)))
+                      .toList();
+            }
+
+            for (Coords pos : occupiedHexes) {
+                final IBuilding building = game.getBoard(step.getBoardId()).getBuildingAt(pos);
+                if (building == null) {
+                    continue;
+                }
+
+                // Add the mass of anyone else standing in/on this building.
+                double fullMass = mass + owner.getMassOfAllInBuilding(game, pos, step.getBoardId());
+
+                if (fullMass > building.getCurrentCF(pos)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public @Nullable Coords calculateAlliesCenter(int myId, @Nullable List<Entity> friends, Game game) {
+        return calcAllyCenter(myId, friends, game);
+    }
+
+    public static @Nullable Coords calcAllyCenter(int myId, @Nullable List<Entity> friends, Game game) {
+        if ((friends == null) || friends.size() <= 1) {
+            return null;
+        }
+
+        int xTotal = 0;
+        int yTotal = 0;
+        int friendOnBoardCount = 0;
+        Entity me = game.getEntity(myId);
+        if (me == null) {
+            return null;
+        }
+        Board board = game.getBoard(me);
+
+        for (Entity friend : friends) {
+            if (friend.getId() == myId) {
+                continue;
+            }
+
+            // Skip any friends not on the board.
+            if (friend.isOffBoard() || !game.onTheSameBoard(me, friend)) {
+                continue;
+            }
+            Coords friendPosition = friend.getPosition();
+            if ((friendPosition == null) || !board.contains(friendPosition)) {
+                continue;
+            }
+
+            xTotal += friendPosition.getX();
+            yTotal += friendPosition.getY();
+            friendOnBoardCount++;
+        }
+
+        if (friendOnBoardCount == 0) {
+            return null;
+        }
+
+        int xCenter = Math.round((float) xTotal / friendOnBoardCount);
+        int yCenter = Math.round((float) yTotal / friendOnBoardCount);
+        Coords center = new Coords(xCenter, yCenter);
+
+        if (!board.contains(center)) {
+            logger.error("Center of ally group {} not within board boundaries.", center.toFriendlyString());
+            return null;
+        }
+
+        return center;
+    }
+
+    protected Princess getOwner() {
+        return owner;
+    }
+
+    /**
+     * Convenience property to access bot-wide state information.
+     *
+     * @return the owner's path ranker state
+     */
+    protected PathRankerState getPathRankerState() {
+        return owner.getPathRankerState();
+    }
+}

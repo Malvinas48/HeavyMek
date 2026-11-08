@@ -1,0 +1,5988 @@
+/*
+ * Copyright (C) 2000-2011 Ben Mazur (bmazur@sev.org)
+ * Copyright (C) 2011-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+package megamek.client.bot.princess;
+
+import java.io.File;
+import java.text.DecimalFormat;
+import java.text.NumberFormat;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.stream.Collectors;
+
+import jakarta.annotation.Nullable;
+import megamek.client.bot.BotClient;
+import megamek.client.bot.BotHeatEquipmentManager;
+import megamek.client.bot.ChatProcessor;
+import megamek.client.bot.Messages;
+import megamek.client.bot.PhysicalCalculator;
+import megamek.client.bot.PhysicalOption;
+import megamek.client.bot.princess.FireControl.FireControlType;
+import megamek.client.bot.princess.PathRanker.PathRankerType;
+import megamek.client.bot.princess.UnitBehavior.BehaviorType;
+import megamek.client.bot.princess.coverage.Builder;
+import megamek.client.ui.SharedUtility;
+import megamek.client.ui.clientGUI.GUIPreferences;
+import megamek.client.ui.panels.phaseDisplay.TowLinkWarning;
+import megamek.codeUtilities.MathUtility;
+import megamek.codeUtilities.StringUtility;
+import megamek.common.*;
+import megamek.common.BulldozerMovePath.MPCostComparator;
+import megamek.common.actions.ArtilleryAttackAction;
+import megamek.common.actions.DisengageAction;
+import megamek.common.actions.EntityAction;
+import megamek.common.actions.FindClubAction;
+import megamek.common.actions.ReconCameraSpotAction;
+import megamek.common.actions.SearchlightAttackAction;
+import megamek.common.actions.SpotAction;
+import megamek.common.actions.TorsoTwistAction;
+import megamek.common.actions.WeaponAttackAction;
+import megamek.common.battleArmor.BattleArmor;
+import megamek.common.bays.Bay;
+import megamek.common.board.AllowedDeploymentHelper;
+import megamek.common.board.Board;
+import megamek.common.board.BoardLocation;
+import megamek.common.board.Coords;
+import megamek.common.board.DeploymentElevationType;
+import megamek.common.board.ElevationOption;
+import megamek.common.compute.Compute;
+import megamek.common.containers.PlayerIDAndList;
+import megamek.common.enums.AimingMode;
+import megamek.common.enums.ForcedWithdrawalOrder;
+import megamek.common.enums.GamePhase;
+import megamek.common.enums.MoveStepType;
+import megamek.common.equipment.AmmoMounted;
+import megamek.common.equipment.AmmoType;
+import megamek.common.equipment.BombMounted;
+import megamek.common.equipment.EquipmentMode;
+import megamek.common.equipment.GunEmplacement;
+import megamek.common.equipment.Mounted;
+import megamek.common.equipment.Transporter;
+import megamek.common.equipment.WeaponMounted;
+import megamek.common.equipment.WeaponType;
+import megamek.common.equipment.enums.BombType.BombTypeEnum;
+import megamek.common.event.GameCFREvent;
+import megamek.common.event.player.GamePlayerChatEvent;
+import megamek.common.game.BotHonorReport;
+import megamek.common.game.Game;
+import megamek.common.game.GameTurn;
+import megamek.common.game.IGame;
+import megamek.common.game.InitiativeRoll;
+import megamek.common.moves.MovePath;
+import megamek.common.moves.MoveStep;
+import megamek.common.net.enums.PacketCommand;
+import megamek.common.net.packets.InvalidPacketDataException;
+import megamek.common.net.packets.Packet;
+import megamek.common.options.OptionsConstants;
+import megamek.common.orders.UnitOrders;
+import megamek.common.pathfinder.AeroGroundPathFinder;
+import megamek.common.pathfinder.BoardClusterTracker;
+import megamek.common.pathfinder.PathDecorator;
+import megamek.common.pathfinder.ShortestPathFinder;
+import megamek.common.rolls.PilotingRollData;
+import megamek.common.units.*;
+import megamek.common.util.BoardUtilities;
+import megamek.common.util.StringUtil;
+import megamek.common.weapons.AmmoWeapon;
+import megamek.common.weapons.Weapon;
+import megamek.common.weapons.attacks.StopSwarmAttack;
+import megamek.logging.MMLogger;
+import org.apache.logging.log4j.Level;
+
+public class Princess extends BotClient {
+    private static final MMLogger LOGGER = MMLogger.create(Princess.class);
+    /** The number of ways two dice can fall. */
+    private static final int OUTCOMES_ON_2D6 = 36;
+    /** The number of ways to roll each total on 2d6, indexed by the total. */
+    private static final int[] WAYS_TO_ROLL_ON_2D6 = { 0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1 };
+    private static final char PLUS = '+';
+    private static final char MINUS = '-';
+
+    private static final int MAX_OVERHEAT_AMS = 14;
+
+    /**
+     * Heat a unit standing in a burning hex gains every turn, halved for a Mek with intact
+     * heat-dissipating armor. Mirrors the fire check in the server's {@code HeatResolver}.
+     */
+    private static final int FIRE_HEAT_PER_TURN = 5;
+
+    /**
+     * Number of jump MP priced when asking whether a heat-stalled unit can afford to jump clear. One hex
+     * is the cheapest jump that gets a unit moving again, and Princess chooses the path, so this is the
+     * least the unit could commit to rather than the jump it would most likely make.
+     */
+    private static final int CHEAPEST_JUMP_DISTANCE = 1;
+
+    /**
+     * Highest target number to consider when not aiming at the head on an immobile Mek
+     */
+    private static final int SHUTDOWN_MAX_TARGET_NUMBER = 12;
+
+    /**
+     * Default maximum location armor for checking called shots
+     */
+    private static final int CALLED_SHOT_DEFAULT_MAX_ARMOR = 10;
+
+    /**
+     * Combined armor and structure value where a location is at risk of destruction
+     */
+    private static final int LOCATION_DESTRUCTION_THREAT = 5;
+
+    /**
+     * Difference in to-hit number between a general shot at an immobile Mek, and aiming for the head
+     */
+    private static final int IMMOBILE_HEAD_SHOT_MODIFIER = 7;
+
+    /**
+     * To-hit modifier for aimed shots against active targets
+     */
+    private static final int AIMED_SHOT_MODIFIER = 3;
+
+    /**
+     * To-hit modifier for called shots
+     */
+    private static final int CALLED_SHOT_MODIFIER = 3;
+
+    /**
+     * Minimum standoff (in hexes) artillery wants to keep from the nearest enemy under shoot-and-scoot. At or inside
+     * this range indirect fire is denied (one mapsheet, the indirect artillery minimum), so a held artillery unit
+     * displaces to re-open the distance. See ComputeToHitIsImpossible (TooShortForIndirectArty).
+     */
+    private static final int ARTILLERY_MINIMUM_STANDOFF = Board.DEFAULT_BOARD_HEIGHT;
+
+    /**
+     * Minimum damage to be considered as a 'big gun' for prioritizing aimed shot locations
+     */
+    private static final int BIG_GUN_MIN_DAMAGE = 10;
+
+    /**
+     * Range to check damage when determining if a weapon is a 'big gun'
+     */
+    private static final int BIG_GUN_TYPICAL_RANGE = 5;
+
+    /**
+     * Minimum walking speed to consider for calling a shot low
+     */
+    private static final int CALLED_SHOT_MIN_MOVE = 6;
+
+    /**
+     * Minimum jump distance to consider for calling a shot low
+     */
+    private static final int CALLED_SHOT_MIN_JUMP = 5;
+
+    /**
+     * Distance to the waypoint to consider for considering the waypoint reached
+     */
+    public static final int DISTANCE_TO_WAYPOINT = 3;
+
+
+    private final IHonorUtil honorUtil = new HonorUtil();
+
+    private boolean initialized = false;
+
+    // path rankers and fire controls, organized by their explicitly given types to avoid confusion
+    private HashMap<PathRankerType, IPathRanker> pathRankers;
+    private HashMap<FireControlType, FireControl> fireControls;
+    private FireControlState fireControlState;
+    private PathRankerState pathRankerState;
+    private ArtilleryTargetingControl atc;
+
+    // What the bot has learned or decided and needs on a later turn. Reach it through getMemory().
+    private BotMemory memory;
+
+    // Which of the bot's units withdraw under forced withdrawal. Reach it through getForcedWithdrawalTracker().
+    private ForcedWithdrawalTracker forcedWithdrawalTracker;
+
+    // Carries out the orders players give the bot's units. Reach it through getUnitOrdersFollower().
+    private UnitOrdersFollower unitOrdersFollower;
+
+    // Reports on the units' orders, by radio or plainly. Reach it through getOrdersRadio().
+    private OrdersRadio ordersRadio;
+
+    private Integer spinUpThreshold = null;
+
+    private double moveEvaluationTimeEstimate = 0;
+    private final Precognition precognition;
+    private final Thread precognitionThread;
+    /**
+     * Mapping to hold the damage allocated to each targetable, stored by ID. Used to allocate damage more intelligently
+     * and avoid overkill.
+     */
+    private final ConcurrentHashMap<Integer, Double> damageMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Integer, Integer> teamTagTargetsMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Map.Entry<Integer, Coords>, List<WeaponMounted>> incomingGuidablesMap = new ConcurrentHashMap<>();
+    private final Set<Coords> strategicBuildingTargets = new HashSet<>();
+    private boolean fallBack = false;
+    private final ChatProcessor chatProcessor = new ChatProcessor();
+    private boolean fleeBoard = false;
+    private boolean holdPosition = false;
+    private AerospaceFocus aerospaceFocus = AerospaceFocus.AUTO;
+    private AerospaceGroundOrder aerospaceGroundOrder = AerospaceGroundOrder.AUTO;
+    private boolean shootAndScoot = false;
+    private Coords shootAndScootHex = null;
+    private final Set<Integer> designatedTagTargets = new HashSet<>();
+    private final MoraleUtil moraleUtil = new MoraleUtil();
+    private final ArtilleryCommandAndControl artilleryCommandAndControl = new ArtilleryCommandAndControl();
+    // Track entities that fired an AMS manually this round
+    private List<Integer> manualAMSIds;
+
+    // Master switch to enable/disable use of enhanced targeting system (aimed/called shots)
+    private boolean enableEnhancedTargeting;
+
+    // Limits types of units Princess will target and attack with enhanced targeting
+    private List<Integer> enhancedTargetingTargetTypes;
+    private List<Integer> enhancedTargetingAttackerTypes;
+    // Controls whether Princess will use called shots on immobile targets
+    private boolean useCalledShotsOnImmobileTarget;
+
+    // Controls whether Princess will use enhanced targeting on targets that have partial cover
+    private boolean allowCoverEnhancedTargeting;
+    private CoverageValidator coverageValidator;
+    private SwarmCenterManager swarmCenterManager;
+
+    /**
+     * Returns a new Princess Bot with the given behavior and name, configured for the given host and port. The new
+     * Princess Bot outputs its settings to its own LOGGER.
+     */
+    public static Princess createPrincess(String name, String host, int port, BehaviorSettings behavior) {
+        Princess result = new Princess(name, host, port);
+        result.startPrecognition();
+        result.setBehaviorSettings(behavior);
+        LOGGER.debug(result.getBehaviorSettings().toLog());
+        return result;
+    }
+
+    /**
+     * Constructor - initializes a new instance of the Princess bot.
+     *
+     * @param name The display name.
+     * @param host The host address to which to connect.
+     * @param port The port on the host where to connect.
+     */
+    public Princess(final String name, final String host, final int port) {
+        super(name, host, port);
+        setBehaviorSettings(BehaviorSettingsFactory.getInstance().DEFAULT_BEHAVIOR);
+
+        fireControlState = new FireControlState();
+        pathRankerState = new PathRankerState();
+
+        // Set up enhanced targeting
+        resetEnhancedTargeting(true);
+
+        // Start-up precognition now, so that it can instantiate its game instance,
+        // and it will stay up-to date.
+        precognition = new Precognition(this);
+        precognitionThread = new Thread(precognition, "Princess-precognition (" + getName() + ")");
+        // Precognition is a pure look-ahead cache with no state worth preserving, so it must never be the reason a
+        // process stays alive. die() interrupts it in the normal case; this covers a bot that was dropped without one.
+        precognitionThread.setDaemon(true);
+    }
+
+    /**
+     * Helper method to start the pre-cognition. This is extracted from the initializer to allow for sub-classing of
+     * Princess and remove the possibility that it'll start before a sub-class finishes initializing.
+     */
+    public void startPrecognition() {
+        precognitionThread.start();
+    }
+
+    /**
+     * Lazy-loading accessor for the artillery targeting control.
+     *
+     * @return {@link ArtilleryTargetingControl}
+     */
+    public ArtilleryTargetingControl getArtilleryTargetingControl() {
+        if (atc == null) {
+            atc = new ArtilleryTargetingControl();
+        }
+
+        return atc;
+    }
+
+    /**
+     * Gets the appropriate path ranker instance given an entity Uses the entity's EType flags to figure out which one
+     * to return Returns BasicPathRanker by default.
+     *
+     * @param entity The entity whose ETYPE to check
+     *
+     * @return Path ranker instance
+     */
+    IPathRanker getPathRanker(Entity entity) {
+        if (entity.hasETypeFlag(Entity.ETYPE_INFANTRY)) {
+            return pathRankers.get(PathRankerType.Infantry);
+        } else if (entity.isAero() && game.useVectorMove()) {
+            return pathRankers.get(PathRankerType.NewtonianAerospace);
+        } else if (behaviorSettings.isExperimental()) {
+            return pathRankers.get(PathRankerType.Utility);
+        } else if (isAtmosphericAerospace(entity)) {
+            // Deliberately the last branch before the fallback: everything that reached a ranker before now
+            // still reaches the same one, and only what used to fall through to Basic arrives here. Princess
+            // registers its Basic ranker in this slot, so for Princess that fall-through is unchanged.
+            return pathRankers.get(PathRankerType.Aerospace);
+        }
+
+        return pathRankers.get(PathRankerType.Basic);
+    }
+
+    /**
+     * Whether this unit is flying under the atmospheric aerospace rules - over a ground mapsheet or on a
+     * low-altitude map.
+     *
+     * <p>Excludes space, which has no altitude and therefore no dead zone, and excludes vector movement,
+     * which {@link PathRankerType#NewtonianAerospace} already handles.</p>
+     *
+     * @param entity the unit to test
+     *
+     * @return {@code true} if the unit is an airborne aerospace unit in an atmosphere
+     */
+    protected boolean isAtmosphericAerospace(Entity entity) {
+        return entity.isAero() && entity.isAirborne() && !entity.isSpaceborne() && !game.useVectorMove();
+    }
+
+    IPathRanker getPathRanker(PathRankerType pathRankerType) {
+        return pathRankers.get(pathRankerType);
+    }
+
+    public boolean getFallBack() {
+        return fallBack;
+    }
+
+    boolean getFleeBoard() {
+        return fleeBoard;
+    }
+
+    /**
+     * Picks a tag target based on the data contained within the given GameCFREvent Expects the event to have some tag
+     * targets and tag target types.
+     */
+    @Override
+    protected int pickTagTarget(GameCFREvent evt) {
+        List<Integer> TAGTargets = evt.getTAGTargets();
+        List<Integer> TAGTargetTypes = evt.getTAGTargetTypes();
+        Map<Coords, Integer> tagTargetHexes = new HashMap<>(); // maps coordinates to target index
+
+        // Algorithm:
+        // get a list of the hexes being tagged
+        // figure out how much damage a hit to each of the tagged hexes will do (relatively)
+        // pick the one which will result in the best damage
+
+        // get list of targetable hexes
+        for (int tagIndex = 0; tagIndex < TAGTargets.size(); tagIndex++) {
+            int nType = TAGTargetTypes.get(tagIndex);
+            Targetable tgt = getGame().getTarget(nType, TAGTargets.get(tagIndex));
+            if (tgt != null && !tagTargetHexes.containsKey(tgt.getPosition())) {
+                tagTargetHexes.put(tgt.getPosition(), tagIndex);
+            }
+        }
+
+        Entity arbitraryEntity = getArbitraryEntity();
+        if (arbitraryEntity == null) {
+            return 0;
+        }
+
+        double maxDamage = -Double.MAX_VALUE;
+        Coords maxDamageHex = null;
+
+        // invoke ArtilleryTargetingControl.calculateDamageValue
+        for (Coords targetHex : tagTargetHexes.keySet()) {
+            // a note on parameters:
+            // we don't care about exact damage value since we're just comparing them relative to one another
+            //  note: technically we should,
+            // we don't care about specific firing entity, we just want one on our side
+            //      since we only use it to determine friendliness
+            double currentDamage = getArtilleryTargetingControl().calculateDamageValue(10,
+                  targetHex,
+                  arbitraryEntity,
+                  game,
+                  this);
+            if (currentDamage > maxDamage) {
+                maxDamage = currentDamage;
+                maxDamageHex = targetHex;
+            }
+        }
+
+        if (maxDamageHex != null) {
+            return tagTargetHexes.get(maxDamageHex);
+        } else {
+            return 0;
+        }
+    }
+
+    boolean getForcedWithdrawal() {
+        return getBehaviorSettings().isForcedWithdrawal();
+    }
+
+    /**
+     * Sets whether Princess-controlled units are allowed to flee off the board once they reach their destination edge.
+     *
+     * @param fleeBoard {@code true} if units should leave the board when they reach their destination edge.
+     * @param reason    The reason for the change, used for logging.
+     */
+    public void setFleeBoard(final boolean fleeBoard, final String reason) {
+        LOGGER.debug("Setting Flee Board {} because: {}", fleeBoard, reason);
+
+        this.fleeBoard = fleeBoard;
+    }
+
+    public FireControlState getFireControlState() {
+        return fireControlState;
+    }
+
+    public PathRankerState getPathRankerState() {
+        return pathRankerState;
+    }
+
+    Precognition getPrecognition() {
+        return precognition;
+    }
+
+    public int getMaxWeaponRange(Entity entity) {
+        return getMaxWeaponRange(entity, false);
+    }
+
+    /**
+     * @param entity         Entity we're checking
+     * @param airborneTarget Whether the potential target is in the air, only relevant for aircraft shooting at other
+     *                       aircraft on ground maps.
+     *
+     * @return maximum weapon range for the given entity, in hexes, with direct-fire artillery counted at its 17-hex
+     *       reach rather than its range in map sheets. Cached version of {@link ArtilleryReach#maxWeaponRange}.
+     */
+    public int getMaxWeaponRange(Entity entity, boolean airborneTarget) {
+        return getFireControlState().getWeaponRanges(airborneTarget)
+              .computeIfAbsent(entity.getId(), ent -> ArtilleryReach.maxWeaponRange(entity, airborneTarget));
+    }
+
+    public void setFallBack(final boolean fallBack, final String reason) {
+        LOGGER.debug("Setting Fall Back {} because: {}", fallBack, reason);
+        this.fallBack = fallBack;
+    }
+
+    /**
+     * @return {@code true} if the bot has been ordered to hold position (units stay where they are).
+     */
+    public boolean getHoldPosition() {
+        return holdPosition;
+    }
+
+    /**
+     * Orders the bot to hold position: its units stay where they are during the movement phase (they still fight from
+     * their current location and may turn in place to face the enemy) until the hold is lifted. Airborne units are
+     * exempt, as they cannot legally stand still.
+     *
+     * @param holdPosition {@code true} to hold position, {@code false} to resume normal movement.
+     */
+    public void setHoldPosition(final boolean holdPosition) {
+        LOGGER.info("{}: setting hold position to {}", getName(), holdPosition);
+        this.holdPosition = holdPosition;
+    }
+
+    /**
+     * @return the standing aerospace focus order, {@link AerospaceFocus#AUTO} when none has been given.
+     */
+    public AerospaceFocus getAerospaceFocus() {
+        return aerospaceFocus;
+    }
+
+    /**
+     * Sets the flight's standing order: press the air battle, support the ground force, or AUTO to let the doctrine
+     * weigh both halves itself. A battle order rather than saved configuration - it is not part of behavior settings
+     * and resets with the bot client.
+     *
+     * @param aerospaceFocus the focus to fly under
+     */
+    public void setAerospaceFocus(final AerospaceFocus aerospaceFocus) {
+        LOGGER.info("{}: setting aerospace focus to {}", getName(), aerospaceFocus);
+        this.aerospaceFocus = aerospaceFocus;
+    }
+
+    /**
+     * @return the standing ground-or-sky order for DropShips and small craft, {@link AerospaceGroundOrder#AUTO}
+     *       when none has been given.
+     */
+    public AerospaceGroundOrder getAerospaceGroundOrder() {
+        return aerospaceGroundOrder;
+    }
+
+    /**
+     * Orders the bot's DropShips and small craft to lift off, land, or hold their current domain. Fighters are
+     * unaffected. A battle order rather than saved configuration - it resets with the bot client.
+     *
+     * @param aerospaceGroundOrder the order to follow
+     */
+    public void setAerospaceGroundOrder(final AerospaceGroundOrder aerospaceGroundOrder) {
+        LOGGER.info("{}: setting aerospace ground order to {}", getName(), aerospaceGroundOrder);
+        this.aerospaceGroundOrder = aerospaceGroundOrder;
+    }
+
+    /**
+     * @return {@code true} if "shoot and scoot" is enabled, letting a threatened artillery unit displace to regain its
+     *       standoff instead of holding in place
+     */
+    public boolean getShootAndScoot() {
+        return shootAndScoot;
+    }
+
+    /**
+     * Enables or disables "shoot and scoot" for artillery. While the bot is holding position, an artillery unit with
+     * usable ammo that has an enemy inside its minimum effective range breaks the hold and displaces toward safety to
+     * regain standoff, instead of sitting still and being overrun. Only the threatened artillery unit moves; every
+     * other unit keeps holding.
+     *
+     * @param shootAndScoot {@code true} to let threatened artillery displace, {@code false} for a pure hold.
+     */
+    public void setShootAndScoot(final boolean shootAndScoot) {
+        LOGGER.info("{}: setting shoot and scoot to {}", getName(), shootAndScoot);
+        this.shootAndScoot = shootAndScoot;
+        if (!shootAndScoot) {
+            shootAndScootHex = null;
+            getMemory().forgetAllScooting();
+        }
+    }
+
+    /**
+     * @return The hex the bot's artillery should fall back to under shoot-and-scoot, or {@code null} to auto-displace away from
+     *       the nearest enemy
+     */
+    public @Nullable Coords getShootAndScootHex() {
+        return shootAndScootHex;
+    }
+
+    /**
+     * Designates a fallback hex for shoot-and-scoot: threatened artillery heads to this hex (which may take several
+     * turns) and then holds and fires from there, instead of auto-displacing. Setting a hex also enables
+     * shoot-and-scoot. Passing {@code null} clears the hex and reverts to auto-displacement.
+     *
+     * @param shootAndScootHex The fallback hex, or {@code null} to clear it
+     */
+    public void setShootAndScootHex(final @Nullable Coords shootAndScootHex) {
+        LOGGER.info("{}: setting shoot and scoot hex to {}", getName(), shootAndScootHex);
+        this.shootAndScootHex = shootAndScootHex;
+        getMemory().forgetAllScooting();
+        if (shootAndScootHex != null) {
+            shootAndScoot = true;
+        }
+    }
+
+    /**
+     * @return The set of enemy unit IDs the player has designated for the bot to TAG (for the player's own homing
+     *       artillery). The bot's TAG fire prefers these targets when they are hittable.
+     */
+    public Set<Integer> getDesignatedTagTargets() {
+        return designatedTagTargets;
+    }
+
+    /**
+     * Designates an enemy unit for the bot to put its TAG on, so a player's homing artillery has a known designation.
+     *
+     * @param targetId The enemy unit ID to TAG
+     */
+    public void addDesignatedTagTarget(final int targetId) {
+        LOGGER.info("{}: designating unit {} as a TAG target", getName(), targetId);
+        designatedTagTargets.add(targetId);
+    }
+
+    /**
+     * Clears all designated TAG targets, returning the bot's TAG to autonomous best-hit targeting.
+     */
+    public void clearDesignatedTagTargets() {
+        LOGGER.info("{}: clearing designated TAG targets", getName());
+        designatedTagTargets.clear();
+    }
+
+    /**
+     * A bot artillery heat-map marker. For a predicted enemy position the value is the round of the prediction; for a
+     * shot it is the countdown of turns until the round lands (0 = lands this turn). The heat is the number of enemies
+     * feeding the hex, which drives a predicted hex's cold-to-hot color.
+     *
+     * @param turn      The value to show on the hex: the prediction round, or a shot's turns-til-impact countdown
+     * @param heatUnits The number of enemies contributing to this hex's heat
+     */
+    public record HeatMapMarker(int turn, int heatUnits) {}
+
+    /**
+     * Optionally paints this bot's artillery heat map on the board for testing: a cold-to-hot color fill at each hex an
+     * enemy is predicted to advance to (navy blue for a single enemy converging, up to crimson red for many, so the
+     * map cools as units are destroyed), and a crosshair at each hex it is firing at. A predicted hex shows the
+     * prediction's turn; a firing hex counts down the turns until the rounds land. Only acts when the local client has
+     * the "Show Bot Artillery Heat Map" advanced testing setting on; the markers are visible to all and clear
+     * themselves each round. No-op for a headless bot (no GUI preferences).
+     *
+     * @param predictedImpacts The hexes enemies were predicted to advance to, mapped to their heat-map marker
+     * @param chosenTargets    The hexes the bot is firing at (this turn's shots plus in-flight shells), mapped to their
+     *                         heat-map marker (turn = countdown to impact)
+     * @param boardId          The board the hexes are on
+     */
+    public void showArtilleryHeatMap(final Map<Coords, HeatMapMarker> predictedImpacts,
+          final Map<Coords, HeatMapMarker> chosenTargets, final int boardId) {
+        if (!showBotArtilleryHeatMap()) {
+            return;
+        }
+        for (Map.Entry<Coords, HeatMapMarker> predicted : predictedImpacts.entrySet()) {
+            sendHeatMapMarker(predicted.getKey(), boardId, SpecialHexDisplay.HEAT_MAP_KIND_PREDICTED,
+                  predicted.getValue(), "predicted enemy position");
+        }
+        for (Map.Entry<Coords, HeatMapMarker> chosen : chosenTargets.entrySet()) {
+            sendHeatMapMarker(chosen.getKey(), boardId, SpecialHexDisplay.HEAT_MAP_KIND_FIRING,
+                  chosen.getValue(), "firing here");
+        }
+    }
+
+    /**
+     * Sends one heat-map special hex display. The info text is prefixed with {@link SpecialHexDisplay#HEAT_MAP_PREFIX}
+     * followed by the control token {@code <turn>:<heat>:<kind>}, which the board view parses to draw the turn on the
+     * hex, pick the cold-to-hot color from the enemy count (heat), and tell a predicted-position fill apart from a
+     * firing crosshair. Both marker kinds use the crosshair icon type; the board view paints predicted hexes as a
+     * color fill instead and only draws the icon for firing hexes.
+     *
+     * @param coords      The hex to mark
+     * @param boardId     The board the hex is on
+     * @param kind        The marker kind, {@link SpecialHexDisplay#HEAT_MAP_KIND_PREDICTED} or
+     *                    {@link SpecialHexDisplay#HEAT_MAP_KIND_FIRING}
+     * @param marker      The marker's turn and heat (number of enemies converging on the hex)
+     * @param description The human-readable description for the hover text
+     */
+    private void sendHeatMapMarker(Coords coords, int boardId, String kind, HeatMapMarker marker,
+          String description) {
+        String info = SpecialHexDisplay.HEAT_MAP_PREFIX + marker.turn() + ":" + marker.heatUnits() + ":" + kind
+              + " " + getName() + ": " + description + " (turn " + marker.turn() + ", " + marker.heatUnits()
+              + " units)";
+        sendSpecialHexDisplayAppend(coords, boardId,
+              new SpecialHexDisplay(SpecialHexDisplay.Type.ARTILLERY_TARGET, getGame().getRoundCount(),
+                    getLocalPlayer(), info, SpecialHexDisplay.SHD_VISIBLE_TO_ALL));
+    }
+
+    /**
+     * @return {@code true} if the local client has the artillery-heat-map testing setting on, {@code false} for a headless bot with no
+     *       GUI preferences
+     */
+    private boolean showBotArtilleryHeatMap() {
+        try {
+            return GUIPreferences.getInstance().getBoolean(GUIPreferences.ADVANCED_SHOW_BOT_ARTILLERY_HEATMAP);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Builds the movement for an artillery unit under shoot-and-scoot. The unit holds and fires at standoff and never
+     * advances into the enemy; when an enemy gets within the minimum effective (indirect) range it scoots. With a
+     * designated fallback hex it heads there (over multiple turns, tracked until it arrives, then holds); otherwise it
+     * auto-displaces away from the nearest enemy.
+     *
+     * @param entity The artillery unit
+     *
+     * @return The chosen move path
+     */
+    private MovePath getShootAndScootPath(final Entity entity) {
+        boolean threatened = isEnemyWithinStandoff(entity);
+
+        if (shootAndScootHex != null) {
+            if (shootAndScootHex.equals(entity.getPosition())) {
+                // arrived at the fallback hex - hold and fire from here
+                getMemory().forgetScooting(entity.getId());
+                LOGGER.info("{}: {} shoot-and-scoot: reached fallback hex {} - holding and firing",
+                      getName(), entity.getDisplayName(), shootAndScootHex);
+                return getHoldPositionPath(entity);
+            }
+            // once threatened, keep heading to the fallback hex until it arrives, even if the threat recedes
+            if (threatened || getMemory().isScooting(entity.getId())) {
+                getMemory().rememberScooting(entity.getId());
+                LOGGER.info("{}: {} shoot-and-scoot: scooting toward fallback hex {}",
+                      getName(), entity.getDisplayName(), shootAndScootHex);
+                sendChat(Messages.getString("Princess.shootAndScoot.movingToHex",
+                      entity.getDisplayName(), shootAndScootHex.getBoardNum()), Level.WARN);
+                return getMoveTowardHexPath(entity, shootAndScootHex);
+            }
+            LOGGER.info("{}: {} shoot-and-scoot: no threat in range - holding and firing (fallback hex {} set)",
+                  getName(), entity.getDisplayName(), shootAndScootHex);
+            return getHoldPositionPath(entity);
+        }
+
+        if (threatened) {
+            LOGGER.info("{}: {} shoot-and-scoot: enemy inside minimum range - displacing to regain standoff",
+                  getName(), entity.getDisplayName());
+            sendChat(Messages.getString("Princess.shootAndScoot.displacing", entity.getDisplayName()), Level.WARN);
+            return getDisplacePath(entity);
+        }
+        LOGGER.info("{}: {} shoot-and-scoot: no threat in range - holding and firing at standoff",
+              getName(), entity.getDisplayName());
+        return getHoldPositionPath(entity);
+    }
+
+    /**
+     * @param entity The artillery unit
+     *
+     * @return {@code true} if the nearest enemy is within the minimum effective (indirect) artillery standoff
+     */
+    private boolean isEnemyWithinStandoff(final Entity entity) {
+        if (entity.getPosition() == null) {
+            return false;
+        }
+        double distanceToEnemy = getPathRanker(entity).distanceToClosestEnemy(entity, entity.getPosition(), getGame());
+        boolean enemyInsideMinimum = distanceToEnemy <= ARTILLERY_MINIMUM_STANDOFF;
+        if (!enemyInsideMinimum) {
+            LOGGER.debug("{}: {} holding - nearest enemy at {} hexes is outside minimum standoff {}",
+                  getName(), entity.getDisplayName(), distanceToEnemy, ARTILLERY_MINIMUM_STANDOFF);
+        }
+        return enemyInsideMinimum;
+    }
+
+    /**
+     * Builds a move that advances the unit as far toward the given destination hex as it can this turn (excluding any
+     * path that leaves the board), so a multi-turn fallback to a designated hex closes the distance each turn.
+     *
+     * @param entity      The unit moving
+     * @param destination The hex to head toward
+     *
+     * @return The chosen path, or a hold-in-place path if none is available
+     */
+    private MovePath getMoveTowardHexPath(final Entity entity, final Coords destination) {
+        List<MovePath> paths = getMovePathsAndSetNecessaryTargets(entity, false);
+        if ((paths == null) || paths.isEmpty()) {
+            return getHoldPositionPath(entity);
+        }
+        MovePath bestPath = null;
+        int bestDistance = Integer.MAX_VALUE;
+        for (MovePath path : paths) {
+            if (path.fliesOffBoard()) {
+                continue;
+            }
+            Coords endpoint = path.getFinalCoords();
+            if (endpoint == null) {
+                continue;
+            }
+            int distance = endpoint.distance(destination);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestPath = path;
+            }
+        }
+        if (bestPath == null) {
+            return getHoldPositionPath(entity);
+        }
+        return performPathPostProcessing(bestPath, 0);
+    }
+
+    /**
+     * @param entity The unit to inspect
+     *
+     * @return {@code true} if the entity carries at least one operational (undestroyed) artillery weapon with usable
+     *       ammunition
+     */
+    private boolean isArtilleryWithAmmo(final Entity entity) {
+        for (WeaponMounted weapon : entity.getWeaponList()) {
+            if (weapon.getType().hasFlag(WeaponType.F_ARTILLERY) && !weapon.isDestroyed()) {
+                for (AmmoMounted ammo : entity.getAmmo(weapon)) {
+                    if (ammo.getUsableShotsLeft() > 0) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Builds a "withdraw toward safety" move for a threatened artillery unit: among its legal move paths (excluding any
+     * that leave the board), it picks the one whose endpoint is farthest from the nearest enemy, so the unit relocates
+     * to regain standoff rather than fleeing. Falls back to holding in place if no better move is available.
+     *
+     * @param entity The artillery unit displacing
+     *
+     * @return The chosen displacement path, or a hold-in-place path if none is better
+     */
+    private MovePath getDisplacePath(final Entity entity) {
+        List<MovePath> paths = getMovePathsAndSetNecessaryTargets(entity, false);
+        if ((paths == null) || paths.isEmpty()) {
+            return getHoldPositionPath(entity);
+        }
+        CardinalEdge homeEdge = getHomeEdge(entity);
+        MovePath bestPath = null;
+        double bestEnemyDistance = -1;
+        int bestHomeDistance = Integer.MAX_VALUE;
+        for (MovePath path : paths) {
+            if (path.fliesOffBoard()) {
+                // displace, do not flee the board
+                continue;
+            }
+            Coords endpoint = path.getFinalCoords();
+            if (endpoint == null) {
+                continue;
+            }
+            double enemyDistance = getPathRanker(entity).distanceToClosestEnemy(entity, endpoint, getGame());
+            int homeDistance = getPathRanker(entity).distanceToHomeEdge(endpoint, entity.getBoardId(), homeEdge,
+                  getGame());
+            // Primary: get as far from the nearest enemy as possible. Tie-break (within half a hex) toward the home
+            // edge, so along a map edge it slides to the rear instead of picking a random equal-distance hex.
+            boolean farther = enemyDistance > (bestEnemyDistance + 0.5);
+            boolean similarButCloserToHome = (Math.abs(enemyDistance - bestEnemyDistance) <= 0.5)
+                  && (homeDistance < bestHomeDistance);
+            if (farther || similarButCloserToHome) {
+                bestEnemyDistance = enemyDistance;
+                bestHomeDistance = homeDistance;
+                bestPath = path;
+            }
+        }
+        if (bestPath == null) {
+            return getHoldPositionPath(entity);
+        }
+        LOGGER.info("{}: {} displacing to {} ({} hexes from nearest enemy, {} from home edge)",
+              getName(), entity.getDisplayName(), bestPath.getFinalCoords(), bestEnemyDistance, bestHomeDistance);
+        return performPathPostProcessing(bestPath, 0);
+    }
+
+    /**
+     * A unit fighting an infantry vs. infantry action (TO:AR p. 169) leaves it by withdrawing, winning or being
+     * repulsed, not by walking out in the Movement Phase: the game lets it walk, but the action would go on
+     * without it standing there.
+     */
+    private boolean isCommittedToInfantryAction(final Entity entity) {
+        return (entity instanceof Infantry) && (entity.getInfantryCombatTargetId() != Entity.NONE);
+    }
+
+    /**
+     * Builds the move path for a unit under a hold position order: the unit stays in its hex but is allowed to change
+     * facing toward the closest enemy so it keeps its weapons bearing.
+     *
+     * @param entity The unit holding position
+     *
+     * @return A turn-in-place move path, or an empty path when no facing change is possible or needed
+     */
+    private MovePath getHoldPositionPath(final Entity entity) {
+        MovePath movePath = new MovePath(game, entity);
+        boolean canTurnInPlace = !entity.isProne() && !entity.isImmobile() && (entity.getWalkMP() > 0)
+              && (entity.getPosition() != null);
+        if (!canTurnInPlace) {
+            return movePath;
+        }
+        Coords closestEnemyPosition = findClosestEnemyPosition(entity);
+        // a player's "when stopped" facing stands while the closest enemy is in that facing's front arc
+        int orderedFacing = getUnitOrdersFollower().facingThatStandsFor(entity,
+              getUnitOrdersFollower().stoppedFacing(entity), entity.getPosition(), closestEnemyPosition);
+        int desiredFacing;
+        if ((orderedFacing != UnitOrders.FACING_AUTO)
+              && (OrderedFacing.sidesApart(entity.getFacing(), orderedFacing)
+              <= OrderedFacing.twistReach(entity))) {
+            // its torso or turret reaches the ordered facing: it twists that way in the fire phase rather than
+            // spending movement to turn, which would count as having moved
+            LOGGER.info("[BotOrders] {} (ID {}): holds facing {} and twists to the ordered facing {}",
+                  entity.getDisplayName(), entity.getId(), entity.getFacing(), orderedFacing);
+            return movePath;
+        } else if (orderedFacing != UnitOrders.FACING_AUTO) {
+            desiredFacing = orderedFacing;
+        } else if ((closestEnemyPosition == null) || closestEnemyPosition.equals(entity.getPosition())) {
+            return movePath;
+        } else {
+            desiredFacing = entity.getPosition().direction(closestEnemyPosition);
+        }
+        int rightTurns = ((desiredFacing - entity.getFacing()) + 6) % 6;
+        if (rightTurns == 0) {
+            return movePath;
+        }
+        // turn the short way around
+        if (rightTurns <= 3) {
+            for (int turn = 0; turn < rightTurns; turn++) {
+                movePath.addStep(MoveStepType.TURN_RIGHT);
+            }
+        } else {
+            for (int turn = 0; turn < (6 - rightTurns); turn++) {
+                movePath.addStep(MoveStepType.TURN_LEFT);
+            }
+        }
+        // trim the path in case the unit lacks the MP for the full turn
+        movePath.clipToPossible();
+        return movePath;
+    }
+
+    /**
+     * Finds the position of the deployed enemy unit closest to the given unit. Ejected crews that are not priority
+     * targets count only when no other enemy is deployed, so a unit holding position faces the fight rather than a
+     * pilot (#9194).
+     *
+     * @param entity The unit looking for enemies
+     *
+     * @return The closest enemy position, or {@code null} if no deployed enemy with a position exists
+     */
+    private @Nullable Coords findClosestEnemyPosition(final Entity entity) {
+        Coords closestPosition = null;
+        int closestDistance = Integer.MAX_VALUE;
+        Coords closestCrewPosition = null;
+        int closestCrewDistance = Integer.MAX_VALUE;
+        Set<Integer> priorityTargets = getBehaviorSettings().getPriorityUnitTargets();
+        for (Iterator<Entity> enemies = game.getAllEnemyEntities(entity); enemies.hasNext(); ) {
+            Entity enemy = enemies.next();
+            if ((enemy.getPosition() == null) || enemy.isOffBoard() || !enemy.isDeployed()) {
+                continue;
+            }
+            int distance = entity.getPosition().distance(enemy.getPosition());
+            if ((enemy instanceof EjectedCrew) && !priorityTargets.contains(enemy.getId())) {
+                if (distance < closestCrewDistance) {
+                    closestCrewDistance = distance;
+                    closestCrewPosition = enemy.getPosition();
+                }
+            } else if (distance < closestDistance) {
+                closestDistance = distance;
+                closestPosition = enemy.getPosition();
+            }
+        }
+        return (closestPosition == null) ? closestCrewPosition : closestPosition;
+    }
+
+    @Override
+    public void setBehaviorSettings(final BehaviorSettings behaviorSettings) {
+        LOGGER.info("New behavior settings for {}\n{}", getName(), behaviorSettings.toLog());
+        try {
+            this.behaviorSettings = behaviorSettings.getCopy();
+        } catch (final PrincessException e) {
+            LOGGER.error("", e);
+            return;
+        }
+        getStrategicBuildingTargets().clear();
+        setFallBack(behaviorSettings.shouldGoHome(), "Fall Back Configuration.");
+        setFleeBoard(behaviorSettings.shouldAutoFlee(), "Flee Board Configuration.");
+        if (behaviorSettings.iAmAPirate() && honorUtil instanceof HonorUtil honorUtilCast) {
+            honorUtilCast.setIAmAPirate(behaviorSettings.iAmAPirate());
+        }
+        // Fallback do not care for targets
+        if (!getFallBack()) {
+            for (final String targetCoords : behaviorSettings.getStrategicBuildingTargets()) {
+                if (!StringUtil.isPositiveInteger(targetCoords) || (4 != targetCoords.length())) {
+                    continue;
+                }
+                final String x = targetCoords.substring(0, 2);
+                final String y = targetCoords.replaceFirst(x, "");
+                // Need to subtract 1, since we are given a Hex number string,
+                // which is Coords X + 1Y + 1
+                final Coords coords = new Coords(MathUtility.parseInt(x) - 1, MathUtility.parseInt(y) - 1);
+                getStrategicBuildingTargets().add(coords);
+            }
+        }
+        spinUpThreshold = null;
+        if (initialized) {
+            // path rankers need to be reinitialized since the behavior settings changed, this will
+            // propagate any changes the BasicPathRanker needs.
+            initializePathRankers();
+        }
+        sendPrincessSettings();
+    }
+
+    /**
+     * Get the appropriate instance of a FireControl object for the given entity.
+     *
+     * @param entity The entity in question.
+     *
+     * @return Instance of FireControl
+     */
+    FireControl getFireControl(Entity entity) {
+        if (entity.hasETypeFlag(Entity.ETYPE_INFANTRY)) {
+            return fireControls.get(FireControlType.Infantry);
+            // some entities can shoot at multiple targets without undergoing too much penalty
+            // so let's get them doing that.
+        } else if (entity.getCrew().getCrewType().getMaxPrimaryTargets() > 1 ||
+              entity.hasQuirk(OptionsConstants.QUIRK_POS_MULTI_TRAC) ||
+              entity.hasAbility(OptionsConstants.GUNNERY_MULTI_TASKER) ||
+              entity.getCrew().getCrewType().getMaxPrimaryTargets() < 0) {
+            return fireControls.get(FireControlType.MultiTarget);
+        } else if (isAtmosphericAerospace(entity)) {
+            // Last branch before the fallback, for the same reason as in getPathRanker: a multi-target aero
+            // crew keeps the fire control it already had, and only the Basic fall-through arrives here.
+            return fireControls.get(FireControlType.Aerospace);
+        }
+
+        return fireControls.get(FireControlType.Basic);
+    }
+
+    FireControl getFireControl(FireControlType fireControlType) {
+        return fireControls.get(fireControlType);
+    }
+
+    /**
+     * @return what this bot has learned or decided and needs again on a later turn
+     */
+    public BotMemory getMemory() {
+        if (memory == null) {
+            memory = new BotMemory();
+        }
+        return memory;
+    }
+
+    public UnitBehavior getUnitBehaviorTracker() {
+        return getMemory().getUnitBehaviorTracker();
+    }
+
+    double getDamageAlreadyAssigned(final Targetable target) {
+        final Integer targetId = target.getId();
+        if (damageMap.containsKey(targetId)) {
+            return damageMap.get(targetId);
+        }
+        return 0.0; // If we have no entry, return zero
+    }
+
+    public Set<Coords> getStrategicBuildingTargets() {
+        return strategicBuildingTargets;
+    }
+
+    public boolean hasStrategicBuildingTargets(final Coords coords) {
+        return getStrategicBuildingTargets().contains(coords);
+    }
+
+    public void addStrategicBuildingTarget(final Coords coords) {
+        if (coords == null) {
+            throw new NullPointerException("Coords is null.");
+        }
+        if (!getGame().getBoard().contains(coords)) {
+            LOGGER.warn("Board does not contain {}", coords.toFriendlyString());
+            return;
+        }
+        getStrategicBuildingTargets().add(coords);
+    }
+
+    public void removeStrategicBuildingTarget(final Coords coords) {
+        if (coords == null) {
+            throw new NullPointerException("Coords is null.");
+        }
+        if (!getGame().getBoard().contains(coords)) {
+            LOGGER.warn("Board does not contain {}", coords.toFriendlyString());
+            return;
+        }
+        if (!hasStrategicBuildingTargets(coords)) {
+            LOGGER.warn("Strategic Building Targets does not contain {}", coords.toFriendlyString());
+            return;
+        }
+
+        getStrategicBuildingTargets().remove(coords);
+
+    }
+
+    /**
+     * @return the units the bot most wants to destroy: those set in its behavior, and every unit of an enemy convoy,
+     *       which the bot goes for over its escorts (HammerGS, 2026-10-04)
+     */
+    public Set<Integer> getPriorityUnitTargets() {
+        Set<Integer> targets = getBehaviorSettings().getPriorityUnitTargets();
+        targets.addAll(getUnitOrdersFollower().enemyConvoyUnitIds());
+        return targets;
+    }
+
+    /**
+     * Returns how keenly this bot goes for one of its priority targets, from 1 (shoot first) to 5. Enemy convoy units
+     * are always 1, so a convoy is hit before anything a player put on the list; other units read their priority from
+     * the behavior settings, 3 when none was chosen.
+     *
+     * @param unitId the ID of a unit in {@link #getPriorityUnitTargets()}
+     *
+     * @return the target priority, 1 to 5
+     */
+    public int getTargetPriority(int unitId) {
+        if (getUnitOrdersFollower().enemyConvoyUnitIds().contains(unitId)) {
+            return BehaviorSettings.HIGHEST_TARGET_PRIORITY;
+        }
+        return getBehaviorSettings().getTargetPriority(unitId);
+    }
+
+    /**
+     * Logs which unit a shooter chose to fire at, and whether it is one of this bot's priority targets, so a playtest
+     * or headless log can answer "did the bot really shoot its priority targets first". Silent while the bot has no
+     * priority targets, so ordinary games are not flooded.
+     *
+     * @param shooter the unit firing
+     * @param plan    the firing plan it chose
+     */
+    private void logPriorityTargetChoice(Entity shooter, FiringPlan plan) {
+        Set<Integer> priorityTargets = getPriorityUnitTargets();
+        Targetable target = plan.getTarget();
+        if (priorityTargets.isEmpty() || (target == null)) {
+            return;
+        }
+        if (priorityTargets.contains(target.getId())) {
+            LOGGER.info("[PriorityTargets] {} (ID {}) fires at priority target {} (ID {}), target priority {}",
+                  shooter.getDisplayName(), shooter.getId(), target.getDisplayName(), target.getId(),
+                  getTargetPriority(target.getId()));
+        } else {
+            LOGGER.info("[PriorityTargets] {} (ID {}) fires at {} (ID {}), not a priority target",
+                  shooter.getDisplayName(), shooter.getId(), target.getDisplayName(), target.getId());
+        }
+    }
+
+    public Targetable getAppropriateTarget(Coords strategicTarget) {
+        return getAppropriateTarget(strategicTarget, IGame.DEFAULT_BOARD_ID);
+    }
+
+    public Targetable getAppropriateTarget(Coords strategicTarget, int boardId) {
+        if (game.getBoard(boardId).getBuildingAt(strategicTarget) == null) {
+            return new HexTarget(strategicTarget, boardId, Targetable.TYPE_HEX_CLEAR);
+        } else {
+            return new BuildingTarget(strategicTarget, game.getBoard(boardId), false);
+        }
+    }
+
+    @Override
+    protected Vector<BoardLocation> calculateArtyAutoHitHexes() {
+        try {
+            // currently returns no artillery hit spots
+            // make an empty list
+            final PlayerIDAndList<BoardLocation> artyAutoHitHexes = new PlayerIDAndList<>();
+            // attach my player id to it
+            artyAutoHitHexes.setPlayerID(getLocalPlayer().getId());
+            return artyAutoHitHexes;
+        } catch (Exception ignored) {
+            return new PlayerIDAndList<>();
+        }
+    }
+
+    @Override
+    protected void initTargeting() {
+        resetTagEstimateCaches(GamePhase.TARGETING);
+        getArtilleryTargetingControl().initializeForTargetingPhase();
+    }
+
+    /**
+     * Clears the per-phase TAG estimates: the incoming guided weapon lists and the planned TAG utility per target.
+     * Both are filled while ranking moves and planning fire, from positions that only hold for the current phase.
+     *
+     * @param phase the phase about to start, for the log line
+     */
+    private void resetTagEstimateCaches(GamePhase phase) {
+        LOGGER.debug("[TagEstimates] Clearing {} guided weapon lists and {} planned TAG utilities before the {} phase",
+              incomingGuidablesMap.size(), teamTagTargetsMap.size(), phase);
+        incomingGuidablesMap.clear();
+        teamTagTargetsMap.clear();
+    }
+
+    /**
+     * @param phase the phase about to start
+     *
+     * @return {@code true} if {@link #changePhase(GamePhase)} must clear the TAG estimates before this phase starts:
+     *       Movement and Firing, which run every round, and Offboard, where TAG fires. {@code false} for Targeting,
+     *       which clears them itself in {@link #initTargeting()}; the server skips that phase in any round where no
+     *       unit has artillery, which is why the other three clear them too.
+     */
+    static boolean isTagEstimateResetPhase(GamePhase phase) {
+        return switch (phase) {
+            case MOVEMENT, OFFBOARD, FIRING -> true;
+            default -> false;
+        };
+    }
+
+    @Override
+    protected void calculateDeployment() {
+        final GameTurn turn = game.getTurnForPlayer(localPlayerNumber);
+        final Entity firstChoice = getEntityToDeploy(turn);
+        if (firstChoice == null) {
+            LOGGER.warn("{}: no unit can take this deployment turn", getName());
+            return;
+        }
+        // a formation's leader deploys before its members, so they can deploy in their slots around it; but a unit
+        // that cannot walk on keeps the turn the server counted for it
+        final Entity orderedChoice = getEntity(getUnitOrdersFollower().chooseUnitToDeploy(firstChoice.getId(), turn));
+        final boolean keepsWalkOnTurn = !canWalkOnThisRound(firstChoice) && canWalkOnThisRound(orderedChoice);
+        final Entity deployEntity = keepsWalkOnTurn ? firstChoice : orderedChoice;
+        if (deployEntity == null) {
+            LOGGER.warn("{}: no unit can take this deployment turn", getName());
+            return;
+        }
+        final int entityNum = deployEntity.getId();
+        sendChat("deploying unit " + deployEntity.getChassis(), Level.INFO);
+
+        final Coords deployCoords = getDeploymentCoords(deployEntity, entityNum, true, "deployment");
+        if (deployCoords == null) {
+            LOGGER.warn("Deployment failed, no coords for {}.", deployEntity.getChassis());
+            return;
+        }
+
+        // For now, just use whatever board the unit is set to be on, usually board 0 by default
+        final Board board = game.getBoard(deployEntity);
+        final int decentFacing = getDeploymentFacing(deployEntity, board, deployCoords);
+        final Hex deployHex = board.getHex(deployCoords);
+        final Integer deployElevation = getDeploymentElevation(deployEntity, board, deployCoords, deployHex, true, entityNum);
+        if (deployElevation == null) {
+            return;
+        }
+        LOGGER.info("{} : {} deploying to {}", getName(), deployEntity.getChassis(), deployCoords);
+        deploy(entityNum, deployCoords, board.getBoardId(), decentFacing, deployElevation, new Vector<>(), false);
+    }
+
+    /**
+     * Picks the unit to place on a deployment-phase turn. Under walk-on deployment the server only counts a turn for a
+     * unit that cannot walk on, such as a bot's tractor towing trailers, but the turn itself accepts any undeployed
+     * unit. Spending it on a unit that could have walked on left the tractor with no turn, so it never deployed.
+     *
+     * @param turn the bot's current turn; may be {@code null}
+     *
+     * @return the unit to deploy, or {@code null} if no unit can take this turn
+     */
+    @Nullable
+    Entity getEntityToDeploy(@Nullable GameTurn turn) {
+        if (turn == null) {
+            return null;
+        }
+        final Game currentGame = getGame();
+        Entity firstWalkOnUnit = null;
+        for (Entity entity : currentGame.inGameTWEntities()) {
+            if (!turn.isValidEntity(entity, currentGame) || !entity.shouldDeploy(currentGame.getRoundCount())) {
+                continue;
+            }
+            if (!canWalkOnThisRound(entity)) {
+                LOGGER.info("[WalkOnDeploy] {}: {} cannot walk on, so it takes this deployment turn",
+                      getName(),
+                      entity.getDisplayName());
+                return entity;
+            }
+            if (firstWalkOnUnit == null) {
+                firstWalkOnUnit = entity;
+            }
+        }
+        if (firstWalkOnUnit != null) {
+            LOGGER.info("[WalkOnDeploy] {}: every unit left for this deployment turn could walk on; deploying {} now",
+                  getName(),
+                  firstWalkOnUnit.getDisplayName());
+        }
+        return firstWalkOnUnit;
+    }
+
+    /**
+     * @param entity the unit to check
+     *
+     * @return {@code true} if the unit may enter the board during this round's movement phase
+     */
+    boolean canWalkOnThisRound(Entity entity) {
+        return Game.rulesManager.getRulesGame().canWalkOnThisRound(entity);
+    }
+
+    private @Nullable Coords getDeploymentCoords(final Entity entity,
+          final int entityId,
+          final boolean deleteEntityOnFailure,
+          final String phaseDescription) {
+        if (entity == null) {
+            return null;
+        }
+
+        if (getForcedWithdrawalTracker().isWithdrawing(entity)) {
+            LOGGER.info("Declining to deploy withdrawing unit: {}.", entity.getChassis());
+            if (deleteEntityOnFailure && (entityId != Entity.NONE)) {
+                sendDeleteEntity(entityId);
+            }
+            return null;
+        }
+
+        final List<Coords> startingCoords = getStartingCoordsArray(entity);
+        if (startingCoords.isEmpty()) {
+            LOGGER.error("No valid locations to deploy {} during {}.", entity.getDisplayName(), phaseDescription);
+            if (deleteEntityOnFailure && (entityId != Entity.NONE)) {
+                sendDeleteEntity(entityId);
+            }
+            return null;
+        }
+
+        final Coords deployCoords = getFirstValidCoords(entity, startingCoords);
+        if (deployCoords == null) {
+            LOGGER.error("getCoordsAround gave no location for {} during {}.{}",
+                  entity.getChassis(),
+                  phaseDescription,
+                  deleteEntityOnFailure ? " Removing unit." : "");
+            if (deleteEntityOnFailure && (entityId != Entity.NONE)) {
+                sendDeleteEntity(entityId);
+            }
+            return null;
+        }
+
+        return deployCoords;
+    }
+
+    private int getDeploymentFacing(final Entity entity, final Board board, final Coords deployCoords) {
+        // the facing a player ordered for when it is stopped, or its convoy's way, else toward the enemy's deployment
+        // zone
+        Optional<Coords> enemyZoneCenter = facesEnemyZoneAtDeployment() ? getEnemyDeploymentCenter(board)
+              : Optional.empty();
+        int decentFacing = getUnitOrdersFollower().deployment().deploymentFacing(entity, deployCoords, board,
+              enemyZoneCenter);
+        if (decentFacing != UnitOrders.FACING_AUTO) {
+            return decentFacing;
+        }
+
+        // with no enemy zone to face, face the last deployed enemy
+        decentFacing = -1;
+        for (final Entity enemy : getEnemyEntities()) {
+            if (enemy.isDeployed() && !enemy.isOffBoard() && game.onTheSameBoard(entity, enemy)) {
+                decentFacing = deployCoords.direction(enemy.getPosition());
+                break;
+            }
+        }
+
+        if (-1 == decentFacing) {
+            final Coords center = new Coords(board.getWidth() / 2, board.getHeight() / 2);
+            decentFacing = deployCoords.direction(center);
+        }
+        return decentFacing;
+    }
+
+    private @Nullable Integer getDeploymentElevation(final Entity entity,
+          final Board board,
+          final Coords deployCoords,
+          final Hex deployHex,
+          final boolean deleteEntityOnFailure,
+          final int entityId) {
+        int deployElevation = entity.getElevation();
+
+        if (entity.isAero()) {
+            if (board.isGround()) {
+                // keep the altitude set in the lobby, possibly starting grounded
+                deployElevation = entity.getAltitude();
+            } else if (board.isLowAltitude()) {
+                // try to keep the altitude set in the lobby, but stay above the terrain
+                var deploymentHelper = new AllowedDeploymentHelper(entity,
+                      deployCoords,
+                      board,
+                      deployHex,
+                      game);
+                List<ElevationOption> allowedDeployment = deploymentHelper.findAllowedElevations(DeploymentElevationType.ALTITUDE);
+                if (allowedDeployment.isEmpty()) {
+                    // that's bad, cannot deploy at all
+                    LOGGER.error("Cannot find viable altitude to deploy to");
+                    if (deleteEntityOnFailure && (entityId != Entity.NONE)) {
+                        sendDeleteEntity(entityId);
+                    }
+                    return null;
+                }
+                deployElevation = Math.max(entity.getAltitude(), Collections.min(allowedDeployment).elevation());
+            }
+        } else {
+            deployElevation = getDeployElevation(entity, deployHex);
+            // Compensate for hex elevation where != 0...
+            deployElevation -= deployHex.getLevel();
+        }
+        return deployElevation;
+    }
+
+    /**
+     * Calculate the deployment elevation for the given entity. Gun Emplacements should deploy on the rooftop of the
+     * building for maximum visibility.
+     */
+    private int getDeployElevation(Entity deployEntity, Hex deployHex) {
+        // Entity.elevationOccupied performs a null check on Hex
+        if (deployEntity instanceof GunEmplacement) {
+            return deployEntity.elevationOccupied(deployHex) + deployHex.terrainLevel(Terrains.BLDG_ELEV);
+        } else {
+            return deployEntity.elevationOccupied(deployHex);
+        }
+    }
+
+    /**
+     * Returns the first set of valid deployment coordinates for the given unit out of the given deployment coordinates.
+     * It's possible to return null, which indicates that there are no valid hexes for the given unit to deploy into.
+     */
+    @Override
+    protected @Nullable Coords getFirstValidCoords(final Entity deployedUnit, final List<Coords> possibleDeployCoords) {
+        if (Entity.ETYPE_GUN_EMPLACEMENT == (deployedUnit.getEntityType() & Entity.ETYPE_GUN_EMPLACEMENT)) {
+            final List<Coords> validCoords = calculateTurretDeploymentLocations((GunEmplacement) deployedUnit,
+                  possibleDeployCoords);
+            if (!validCoords.isEmpty()) {
+                return validCoords.getFirst();
+            }
+
+            return null;
+        } else if (EmplacementDeployment.isGunEmplacementBuilding(deployedUnit)) {
+            return calculateEmplacementBuildingDeploymentCoords(deployedUnit, possibleDeployCoords);
+        } else if (getGame().useVectorMove()) {
+            return calculateAdvancedAerospaceDeploymentCoords(deployedUnit, possibleDeployCoords);
+        } else {
+            return rankDeploymentCoords(deployedUnit, possibleDeployCoords);
+        }
+    }
+
+    /**
+     * Function that calculates deployment coordinates
+     *
+     * @param deployedUnit         The unit being considered for deployment
+     * @param possibleDeployCoords The coordinates being considered for deployment
+     *
+     * @return The first valid deployment coordinates.
+     */
+    private Coords calculateAdvancedAerospaceDeploymentCoords(final Entity deployedUnit,
+          final List<Coords> possibleDeployCoords) {
+        for (Coords coords : possibleDeployCoords) {
+            if (!NewtonianAerospacePathRanker.willFlyOffBoard(deployedUnit, coords)) {
+                return coords;
+            }
+        }
+
+        // if we can't find any good deployment coordinates, deploy anyway to the first available one
+        // and maybe eventually we'll slow down enough that we can deploy without immediately flying off
+        if (!possibleDeployCoords.isEmpty()) {
+            return possibleDeployCoords.getFirst();
+        }
+
+        return null;
+    }
+
+    /**
+     * Picks the hex for a TO:AR gun emplacement: dry ground, spaced from the other emplacements, with the widest field
+     * of fire. See {@link EmplacementDeployment}.
+     *
+     * @param deployedUnit         The emplacement being deployed
+     * @param possibleDeployCoords The coordinates being considered for deployment
+     *
+     * @return The chosen coordinates, or null if none are legal
+     */
+    private @Nullable Coords calculateEmplacementBuildingDeploymentCoords(final Entity deployedUnit,
+          final List<Coords> possibleDeployCoords) {
+        final Board board = game.getBoard(deployedUnit);
+        final List<Coords> legalCoords = possibleDeployCoords.stream()
+              .filter(c -> super.getFirstValidCoords(deployedUnit, List.of(c)) != null)
+              .toList();
+        final List<Coords> otherEmplacements = getEntitiesOwned().stream()
+              .filter(e -> (e != deployedUnit) && e.isDeployed() && (e.getPosition() != null)
+                    && (e.getBoardId() == board.getBoardId()) && EmplacementDeployment.isGunEmplacementBuilding(e))
+              .map(Entity::getPosition)
+              .toList();
+        final Coords enemyCentre = getEnemyDeploymentCenter(board).orElse(null);
+        return EmplacementDeployment.choose(deployedUnit, legalCoords, board, otherEmplacements,
+              c -> EmplacementDeployment.fieldOfFire(game, board, c, deployedUnit, enemyCentre));
+    }
+
+    /**
+     * Helper function that calculates the possible locations where a given gun emplacement can be deployed
+     *
+     * @param deployedUnit         The unit to check
+     * @param possibleDeployCoords The list of possible deployment coordinates
+     */
+    private List<Coords> calculateTurretDeploymentLocations(final GunEmplacement deployedUnit,
+          final List<Coords> possibleDeployCoords) {
+        // algorithm:
+        // get all hexes in deployment zone with buildings
+        // for each building, if deploying on the roof does not cause a stacking violation, add it to the list
+        // sort the list in decreasing order based on CF then height
+        final List<Coords> turretDeploymentLocations = new Vector<>();
+
+        for (final Coords coords : possibleDeployCoords) {
+            final IBuilding building = game.getBoard(deployedUnit).getBuildingAt(coords);
+            final Hex hex = game.getBoard(deployedUnit).getHex(coords);
+
+            if (building != null) {
+                final int buildingHeight = hex.terrainLevel(Terrains.BLDG_ELEV);
+
+                // check stacking violation at the roof level
+                final Entity violation = Compute.stackingViolation(game,
+                      deployedUnit,
+                      coords,
+                      buildingHeight,
+                      coords,
+                      null,
+                      deployedUnit.climbMode(),
+                      true);
+                // Ignore coords that could cause a stacking violation
+                if (violation == null) {
+                    turretDeploymentLocations.add(coords);
+                }
+            }
+        }
+
+        turretDeploymentLocations.sort((arg0, arg1) -> calculateTurretDeploymentValue(arg1) -
+              calculateTurretDeploymentValue(arg0));
+        return turretDeploymentLocations;
+    }
+
+    /**
+     * Helper function that calculates the "utility" of placing a turret at the given coords
+     *
+     * @param coords The location of the building being considered.
+     *
+     * @return An "arbitrary" utility number
+     */
+    private int calculateTurretDeploymentValue(final Coords coords) {
+        // algorithm: a building is valued by the following formula:
+        //      (CF + height * 2) / # turrets placed on the roof
+        //      This way, we will generally favor unpopulated higher CF buildings,
+        //      but have some wiggle room in case of a really tall high CF building
+        final IBuilding building = game.getBoard().getBuildingAt(coords);
+        final Hex hex = game.getBoard().getHex(coords);
+        final int turretCount = 1 + game.getGunEmplacements(coords).size();
+
+        return (building.getCurrentCF(coords) + hex.terrainLevel(Terrains.BLDG_ELEV) * 2) / turretCount;
+    }
+
+    protected double rankKernelAroundCoords(MovePath start, Entity deployedUnit, int radius, BasicPathRanker ranker) {
+        // Logging is extremely slow, only use when debugging.
+        StringBuilder sb = null;
+        if (LOGGER.isDebugEnabled()) {
+            sb = new StringBuilder();
+            sb.append("Ranking kernel around hex ").append(start.getFinalCoords().toString());
+        }
+
+        double rank;
+        // allAtDistance uses a concept of radius that is 1 smaller.
+        ArrayList<Coords> kernel = start.getFinalCoords().allAtDistance(radius + 1);
+
+        // Get all paths from the start point to the outer hexes that use "radius" MP
+        // Worse starting hexes have fewer, and shorter, paths
+        ShortestPathFinder pf = ShortestPathFinder.newInstanceOfOneToAll(radius, MoveStepType.FORWARDS, game);
+        pf.run(start);
+
+        // Lower rank is better; 0.0 is minimum at this point.
+        rank = Math.max(kernel.size() - pf.getAllComputedPaths().size(), 0.0);
+        for (MovePath mp : pf.getAllComputedPaths().values()) {
+            rank -= mp.getHexesMoved();
+            rank += ranker.checkPathForHazards(mp, deployedUnit, game);
+        }
+
+        if (sb != null) {
+            sb.append("\n\tAll computed ")
+                  .append(radius)
+                  .append("-length paths: ")
+                  .append(pf.getAllComputedPaths().size());
+            sb.append("\n\tFinal rank (including hazards): ").append(rank);
+            LOGGER.debug(sb.toString());
+        }
+
+        return rank;
+    }
+
+    /**
+     * The middle of the enemy's deployment zones on a board: the average of the middles of the zones the enemy players
+     * deploy in.
+     * The bot faces the units it deploys this way, toward where the enemy will come from, and lays its formations out
+     * facing it.
+     *
+     * @param board the board the bot is deploying on
+     *
+     * @return the hex, or empty when no enemy player with units is known
+     */
+    public Optional<Coords> getEnemyDeploymentCenter(@Nullable Board board) {
+        return EnemyDeploymentZone.center(getGame(), board, getLocalPlayer());
+    }
+
+    /**
+     * Rank possible deployment coordinates by hazard, path freedom, concealment
+     * <p>
+     * <ol>
+     *     <li>Randomly select N coords from list</li>
+     *     <li>
+     *         For selected coords:
+     *         <ol>
+     *             <li>Check if hex is invalid</li>
+     *             <li>Create a MovePath containing the starting coordinate</li>
+     *             <li>Get the hazard value</li>
+     *             <li>Save Coords to HashMap with hazard as key</li>
+     *         </ol>
+     *     </li>
+     * </ol>
+     */
+    /**
+     * Orders the candidate deployment hexes that {@link #rankDeploymentCoords(Entity, List)} will scan.
+     *
+     * <p>This matters more than it looks. The candidate list arrives shuffled, and the scan below stops after roughly
+     * twenty entries, so whatever sits at the front of this list is very nearly the whole choice. Princess returns it
+     * unchanged: each unit is placed on terrain merit alone, with no regard for where the rest of the force went.</p>
+     *
+     * @param deployedUnit        the unit being placed
+     * @param possibleDeployCoords legal deployment hexes
+     *
+     * @return the hexes to scan, in the order to scan them
+     */
+    protected List<Coords> prioritizeDeploymentCoords(Entity deployedUnit, List<Coords> possibleDeployCoords) {
+        return possibleDeployCoords;
+    }
+
+    /**
+     * Whether a unit with no ordered facing deploys facing the middle of the enemy's deployment zone, where the enemy
+     * will come from. Princess faces the nearest deployed enemy, as she always has; CASPAR faces the zone. The bot's
+     * own judgement goes to CASPAR first, to be measured against an unchanged Princess (HammerGS, 2026-10-03).
+     *
+     * @return {@code true} to face the enemy's deployment zone
+     */
+    protected boolean facesEnemyZoneAtDeployment() {
+        return false;
+    }
+
+    /**
+     * Picks the hex a formation leader still to deploy will deploy on, the way it would pick it on its own turn. The
+     * starting-hex scoring stands the unit on every hex it scores and leaves it on the last, so the leader is put back
+     * off the board after: other code reads a unit with a position as one on the board.
+     */
+    private void chooseDeploymentAnchor(Entity leader, Entity pickedBy) {
+        Coords standing = leader.getPosition();
+        Coords anchor;
+        try {
+            anchor = rankDeploymentCoords(leader, getStartingCoordsArray(leader));
+        } finally {
+            leader.setPosition(standing);
+        }
+        if (anchor != null) {
+            getUnitOrdersFollower().setDeploymentAnchor(leader, anchor, pickedBy);
+        }
+    }
+
+    protected Coords rankDeploymentCoords(Entity deployedUnit, List<Coords> possibleDeployCoords) {
+        StringBuilder sb = null;
+        if (LOGGER.isDebugEnabled()) {
+            sb = new StringBuilder();
+            sb.append("Ranking deployment hexes...");
+        }
+
+        if ((deployedUnit.getTowing() != Entity.NONE && game.getEntity(deployedUnit.getTowing()) != null) ||
+              (deployedUnit.getTowedBy() != Entity.NONE) && game.getEntity(deployedUnit.getTowedBy()) != null) {
+            List<Coords> filteredCoords = TowLinkWarning.findValidDeployCoordsForTractorTrailer(game,
+                  deployedUnit,
+                  game.getBoard(deployedUnit));
+            if (!filteredCoords.isEmpty()) {
+                possibleDeployCoords = possibleDeployCoords.stream().filter(filteredCoords::contains).toList();
+            } else {
+                LOGGER.error("No valid locations to tractor/trailer deploy {}", deployedUnit.getDisplayName());
+            }
+        }
+
+
+        // Filter to coords where AllowedDeploymentHelper confirms at least one valid deployment elevation.
+        // This catches prohibited terrain, level-uniformity rules, etc. (e.g. grounded DropShips needing
+        // 7-hex clearance) that BotClient.getFirstValidCoords() does not check.
+        Board deployBoard = game.getBoard(deployedUnit);
+        if (!deployBoard.isSpace()) {
+            boolean groundedAero = deployedUnit.isAero() && !deployedUnit.isAirborne();
+            possibleDeployCoords = possibleDeployCoords.stream()
+                  .filter(c -> {
+                      Hex h = deployBoard.getHex(c);
+                      if (h == null) {
+                          return false;
+                      }
+                      List<ElevationOption> elevations = new AllowedDeploymentHelper(deployedUnit,
+                            c,
+                            deployBoard,
+                            h,
+                            game)
+                            .findAllowedElevations();
+                      return groundedAero
+                            ? elevations.stream().anyMatch(o -> o.elevation() == 0)
+                            : !elevations.isEmpty();
+                  })
+                  .toList();
+        }
+
+        // never where the unit is blocked from where its lance is going, such as across water it cannot cross
+        possibleDeployCoords = getUnitOrdersFollower().keepReachable(deployedUnit, possibleDeployCoords);
+
+        // Order the candidates before the capped scan below only looks at the first handful of them. Princess hands
+        // them back untouched, so each unit deploys on terrain alone; subclasses may reorder to keep a force together.
+        possibleDeployCoords = prioritizeDeploymentCoords(deployedUnit, possibleDeployCoords);
+
+        // where its orders decide it: a leader's anchor, a formation slot, an escort's place. Done here rather than in
+        // prioritizeDeploymentCoords, whose CASPAR override does not call super, so both bots do it.
+        DeploymentPlanner.OrderedDeployment ordered = getUnitOrdersFollower().deployment().orderedDeployment(
+              deployedUnit, possibleDeployCoords, (unit, hexes) -> super.getFirstValidCoords(unit, hexes),
+              this::chooseDeploymentAnchor);
+        if (ordered.hex() != null) {
+            return ordered.hex();
+        }
+        possibleDeployCoords = ordered.candidates();
+
+        // Sample LIMIT number of valid starting hexes, check accessibility and hazards within RADIUS
+        int LIMIT = 20;
+        int RADIUS = 3;
+
+        // Shallow copy of refs list
+        ArrayList<Coords> localCopy = new ArrayList<>(possibleDeployCoords);
+
+        // Hacky, but really, "DEPLOY" should be a path step...
+        MovePath mp = new MovePath(game, deployedUnit);
+        mp.addStep(MoveStepType.NONE);
+        MoveStep deployStep = mp.getLastStep();
+        IPathRanker ranker = getPathRanker(deployedUnit);
+        HashMap<Double, ArrayList<Coords>> rankedCoords = new HashMap<>();
+
+        // Units that deploy airborne don't need to worry about all this
+        if (!(deployedUnit.isAirborne() ||
+              ((deployedUnit.getMovementMode().isVTOL() || deployedUnit.getMovementMode().isWiGE()) &&
+                    deployedUnit.getElevation() > 0))) {
+            double hazard;
+            int longest = 0;
+            int size;
+            for (Coords dest : localCopy) {
+                deployStep.setPosition(dest);
+                if (super.getFirstValidCoords(deployedUnit, List.of(dest)) != null) {
+                    hazard = -((BasicPathRanker) ranker).checkPathForHazards(mp, deployedUnit, game);
+                    if (deployedUnit instanceof BuildingEntity
+                          && getBoard() != null
+                          && getBoard().getHex(dest) != null) {
+                        // If there's anything in the hex, let's increase the hazard so we don't prefer it
+                        hazard -= getBoard().getHex(dest).getTerrainTypesSet().size();
+                    }
+                    if (!rankedCoords.containsKey(hazard)) {
+                        rankedCoords.put(hazard, new ArrayList<>());
+                    }
+                    rankedCoords.get(hazard).add(dest);
+                    size = rankedCoords.get(hazard).size();
+                    longest = Math.max(size, longest);
+
+                    if (sb != null) {
+                        sb.append("\n\tFound valid coordinates (")
+                              .append(dest)
+                              .append(") with initial hazard of: ")
+                              .append(hazard);
+                    }
+                }
+
+                // Only get some subset
+                if (longest > LIMIT || rankedCoords.size() > LIMIT) {
+                    break;
+                }
+            }
+            if (!rankedCoords.isEmpty()) {
+                double bestRank = rankedCoords.keySet().stream().mapToDouble(d -> d).max().getAsDouble();
+                Coords bestCandidate = null;
+                double scoreToBeat = -Double.MAX_VALUE;
+                double current;
+                ArrayList<Coords> candidates = rankedCoords.get(bestRank);
+                for (Coords c : candidates) {
+                    mp.clear();
+                    mp.addStep((deployedUnit.getAnyTypeMaxJumpMP() == 0) ? MoveStepType.NONE : MoveStepType.START_JUMP);
+                    mp.getLastStep().setPosition(c);
+                    // the kernel scores the paths out of a hex, and a unit that cannot move takes none of them
+                    current = bestRank - (cannotMove(deployedUnit) ? 0
+                          : rankKernelAroundCoords(mp, deployedUnit, RADIUS, (BasicPathRanker) ranker));
+                    if (current > scoreToBeat) {
+                        scoreToBeat = current;
+                        bestCandidate = c;
+                    }
+                }
+                if (bestCandidate != null) {
+                    if (sb != null) {
+                        sb.append("\n\tFound best candidate (")
+                              .append(bestCandidate)
+                              .append(") out of ")
+                              .append(candidates.size())
+                              .append(" with a score of ")
+                              .append(scoreToBeat);
+                        LOGGER.debug(sb.toString());
+                    }
+                    return bestCandidate;
+                }
+            }
+        } else {
+            if (sb != null) {
+                sb.append("\n\tAerospace / flying ground units don't worry about ground level hazards;");
+            }
+        }
+
+        if (sb != null) {
+            sb.append("\n\tFalling back to default getFirstValidCoords method!");
+            LOGGER.debug(sb.toString());
+        }
+        // Fall back on old method
+        Coords bestCandidate = super.getFirstValidCoords(deployedUnit, possibleDeployCoords);
+        if (bestCandidate == null) {
+            LOGGER.error("Returning no deployment position; THIS IS BAD!");
+        }
+        return bestCandidate;
+    }
+
+    @Override
+    protected void calculateFiringTurn() {
+        final Entity shooter;
+        try {
+            // get the first entity that can act this turn make sure weapons
+            // are loaded
+            shooter = getEntityToFire(fireControlState);
+        } catch (Exception exception) {
+            LOGGER.error(exception.getMessage(), exception);
+            clearFiringTurnWithoutShooter("Failed to determine which entity should fire");
+            return;
+        }
+
+        if (shooter == null) {
+            // getEntityToFire does not throw when nothing is eligible; it falls back to the game's first
+            // eligible entity, which is itself null when the turn list and the fire control state disagree about
+            // which units can still act. Without this guard the next line dereferences that null, and the
+            // handler at the end of the method then dereferences it a second time, so the bot sends nothing at
+            // all and stands mute for the rest of the phase.
+            clearFiringTurnWithoutShooter("No entity is eligible to fire this turn");
+            return;
+        }
+
+        try {
+            // Forego firing if
+            // a) hidden,
+            // b) under "peaceful" forced withdrawal,
+            // c) majority firepower is jammed
+            // d) best firing plan comes up as crap (no expected damage/null)
+            //
+            // If foregoing firing, unjam highest-damage weapons first, then turret
+            boolean skipFiring = false;
+
+            // If my unit is forced to withdraw, don't fire unless I've been fired on
+            // or I have no retreat path anyway.
+            if (getForcedWithdrawalTracker().isWithdrawing(shooter)) {
+                final StringBuilder msg = new StringBuilder(shooter.getDisplayName()).append(
+                      " is withdrawing.");
+                try {
+                    if (shooter.getSwarmTargetId() != Entity.NONE) {
+                        msg.append("\n\tBut will need to stop swarming before fleeing.");
+                        skipFiring = true;
+                    } else if (getMemory().wasAttackedWhileFleeing(shooter.getId())) {
+                        msg.append("\n\tBut I was fired on, so I will return fire.");
+                    } else if (hasNoRetreatPath(shooter)) {
+                        msg.append("\n\tBut I have no path to my retreat edge, so I will fight on.");
+                    } else {
+                        msg.append("\n\tI will not fire so long as I'm not fired on.");
+                        skipFiring = true;
+                    }
+                } finally {
+                    LOGGER.info(msg.toString());
+                }
+            }
+
+            if (shooter.isHidden()) {
+                skipFiring = true;
+                LOGGER.info("Hidden unit skips firing.");
+            }
+
+            // calculating a firing plan is somewhat expensive, so
+            // we skip this step if we have already decided not to fire due to being hidden or under "peaceful forced withdrawal"
+            if (!skipFiring) {
+                // Set up ammo conservation.
+                final Map<WeaponMounted, Double> ammoConservation = calcAmmoConservation(shooter);
+
+                // entity that can act this turn make sure weapons are loaded
+                final FiringPlan plan = getFireControl(shooter).getBestFiringPlan(shooter,
+                      getHonorUtil(),
+                      game,
+                      ammoConservation);
+                if ((plan != null) && (plan.getExpectedDamage() > 0)) {
+                    getFireControl(shooter).loadAmmo(shooter, plan);
+                }
+                // loading ammo drops any shot that no bin has shots left for
+                if ((plan != null) && !plan.isEmpty() && (plan.getExpectedDamage() > 0)) {
+                    plan.sortPlan();
+
+                    // Log info and debug at different levels
+                    LOGGER.info("{} - Best Firing Plan: {}", shooter.getDisplayName(), plan.getDebugDescription(false));
+                    LOGGER.debug("{} - Detailed Best Firing Plan: {}",
+                          shooter.getDisplayName(),
+                          plan.getDebugDescription(true));
+                    logPriorityTargetChoice(shooter, plan);
+
+                    // Consider making an aimed shot if the target is shut down or the attacker has
+                    // a targeting computer. Alternatively, consider using the called shots optional
+                    // rule to adjust the hit table to something more favorable.
+
+                    boolean isCalledShot = false;
+                    int locationDestruction = Integer.MAX_VALUE;
+                    int aimLocation = Mek.LOC_NONE;
+                    int calledShotDirection = CalledShot.CALLED_NONE;
+
+                    WeaponFireInfo primaryFire = plan.getFirst();
+                    int targetID;
+                    if (primaryFire != null) {
+                        targetID = primaryFire.getTarget().getId();
+                    } else {
+                        targetID = Entity.NONE;
+                    }
+
+                    // TODO: gate this block on a game option or client option
+                    if (targetID > Entity.NONE &&
+                          primaryFire.getTarget() != null &&
+                          plan.stream().allMatch(curFire -> primaryFire.getTarget().getId() == targetID) &&
+                          checkForEnhancedTargeting(shooter,
+                                primaryFire.getTarget(),
+                                primaryFire.getToHit().getCover())) {
+
+                        Entity aimTarget = (Mek) primaryFire.getTarget();
+                        if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_COMBAT_TAC_OPS_CALLED_SHOTS) &&
+                              (!aimTarget.isImmobile() || useCalledShotsOnImmobileTarget)) {
+                            isCalledShot = true;
+                        }
+
+                        // Check for an aimed shot
+                        if (aimTarget.isImmobile() || shooter.hasTargComp()) {
+                            boolean rearShot = primaryFire.getToHit().getSideTable() == ToHitData.SIDE_REAR;
+
+                            // Get the Mek location to aim at. Infantry and BA will go for the head
+                            // if the odds are good.
+                            aimLocation = getAimedShotLocation(primaryFire.getTarget(),
+                                  plan,
+                                  rearShot,
+                                  shooter.isInfantry());
+
+                            // When aiming at a location, don't bother checking for called shots
+                            if (aimLocation != Mek.LOC_NONE) {
+                                isCalledShot = false;
+                                // TODO: this should be adjusted to better handle multiple target types
+                                locationDestruction = aimTarget.getArmor(aimLocation, rearShot) +
+                                      aimTarget.getInternal(aimLocation);
+                            }
+
+                        }
+
+                        if (isCalledShot) {
+
+                            calledShotDirection = getCalledShotDirection(primaryFire.getTarget(),
+                                  primaryFire.getToHit().getSideTable(),
+                                  plan);
+
+                        }
+
+                    }
+
+                    // Add expected damage from the chosen FiringPlan to the
+                    // damageMap for the target enemy.
+                    // while we're looping through all the shots anyway, send any firing mode changes
+                    for (WeaponFireInfo shot : plan) {
+                        Integer targetId = shot.getTarget().getId();
+                        double existingTargetDamage = damageMap.getOrDefault(targetId, 0.0);
+                        double newDamage = existingTargetDamage + shot.getExpectedDamage();
+                        damageMap.put(targetId, newDamage);
+
+                        // Track manual AMS use each round
+                        if (shot.getWeapon().getType().hasFlag(Weapon.F_AMS)) {
+                            if (shot.getWeapon().curMode().equals(Weapon.MODE_AMS_MANUAL)) {
+                                flagManualAMSUse(shooter.getId());
+                            }
+                        }
+
+                        // Set attacks as aimed or called, as required
+                        if (aimLocation != Mek.LOC_NONE || calledShotDirection != CalledShot.CALLED_NONE) {
+                            setAttackAsAimedOrCalled(shot, aimLocation, calledShotDirection, locationDestruction);
+                        }
+                        if (shot.getUpdatedFiringMode() != null) {
+                            super.sendModeChange(shooter.getId(),
+                                  shooter.getEquipmentNum(shot.getWeapon()),
+                                  shot.getUpdatedFiringMode());
+                        }
+                    }
+
+                    // tell the game I want to fire
+                    Vector<EntityAction> actions = new Vector<>();
+
+                    // if using search light, it needs to go before the other actions so we can light up what we're shooting at
+                    // Respect the "Searchlights On by Default" option - disabled means Princess won't use searchlights offensively either.
+                    if (getGame().getOptions().booleanOption(OptionsConstants.SEARCHLIGHTS_ON)) {
+                        SearchlightAttackAction searchLightAction = getFireControl(shooter).getSearchLightAction(shooter,
+                              plan);
+                        if (searchLightAction != null) {
+                            actions.add(searchLightAction);
+                        }
+                    }
+
+                    EntityAction spotAction = getFireControl(shooter).getSpotAction(plan, shooter, fireControlState);
+                    // If the unit's own shot is too trivial to be worth the spotting penalty, spot instead of firing -
+                    // unless the shot is what switches Triple-Strength Myomer on this turn, in which case the heat it
+                    // builds is worth more than the trivial damage suggests.
+                    boolean spotInsteadOfTrivialFire = (spotAction != null)
+                          && (plan.getExpectedDamage() < FireControl.MIN_USEFUL_FIRING_DAMAGE)
+                          && !getFireControl(shooter).firingActivatesTsm(shooter, plan);
+                    if (!spotInsteadOfTrivialFire) {
+                        actions.addAll(plan.getEntityActionVector());
+                    }
+                    if (spotAction != null) {
+                        actions.add(spotAction);
+                        announceSpotting(spotAction, shooter);
+                    }
+
+                    sendAttackData(shooter.getId(), actions);
+                    return;
+                } else {
+                    LOGGER.info("No best firing plan for {}", shooter.getDisplayName());
+                }
+            }
+
+            // if I have decided to skip firing or don't have a firing plan, so let's consider some
+            // alternative uses of my turn
+            Vector<EntityAction> miscPlan = null;
+
+            if (shooter.getSwarmTargetId() != Entity.NONE) {
+                // If we are skipping firing while swarming, it is because we are fleeing...
+                // so let's stop swarming if we are doing so
+                final Mounted<?> stopSwarmWeapon = shooter.getIndividualWeaponList()
+                      .stream()
+                      .filter(weapon -> weapon.getType() instanceof StopSwarmAttack)
+                      .findFirst()
+                      .orElse(null);
+                if (stopSwarmWeapon == null) {
+                    LOGGER.error(
+                          "Failed to find a Stop Swarm Weapon while Swarming a unit, which should not be possible.");
+                } else {
+                    miscPlan = new Vector<>();
+                    miscPlan.add(new WeaponAttackAction(shooter.getId(),
+                          shooter.getSwarmTargetId(),
+                          shooter.getEquipmentNum(stopSwarmWeapon)));
+                }
+            }
+
+            if (miscPlan == null) {
+                // If we don't have any plans, let's consider unjamming our weaponry
+                miscPlan = getFireControl(shooter).getUnjamWeaponPlan(shooter);
+            }
+
+            // if we didn't produce an "unjam weapon" plan, consider spotting and lighting
+            // things up with a searchlight
+            if (miscPlan.isEmpty()) {
+                EntityAction spotAction = getFireControl(shooter).getSpotAction(null, shooter, fireControlState);
+                if (spotAction != null) {
+                    miscPlan.add(spotAction);
+                    announceSpotting(spotAction, shooter);
+                }
+
+                // Respect the "Searchlights On by Default" option
+                if (getGame().getOptions().booleanOption(OptionsConstants.SEARCHLIGHTS_ON)) {
+                    SearchlightAttackAction searchLightAction = getFireControl(shooter).getSearchLightAction(shooter,
+                          null);
+                    if (searchLightAction != null) {
+                        miscPlan.add(searchLightAction);
+                    }
+                }
+            }
+
+            // if we have absolutely nothing else to do, see if we can find a club
+            if (miscPlan.isEmpty()) {
+                FindClubAction findClubAction = getFireControl(shooter).getFindClubAction(shooter);
+                if (findClubAction != null) {
+                    miscPlan.add(findClubAction);
+                }
+            }
+
+            // with nothing to aim at, turn the torso or turret the way the player ordered, which costs nothing
+            int orderedTwist = getUnitOrdersFollower().orderedTwist(shooter);
+            if (orderedTwist != UnitOrders.FACING_AUTO) {
+                LOGGER.info("[BotOrders] {} (ID {}): twists to the ordered facing {}", shooter.getDisplayName(),
+                      shooter.getId(), orderedTwist);
+                miscPlan.add(new TorsoTwistAction(shooter.getId(), orderedTwist));
+            }
+
+            sendAttackData(shooter.getId(), miscPlan);
+        } catch (Exception e) {
+            LOGGER.error(e.getMessage(), e);
+            // Don't lock up, just skip this entity.
+            Vector<EntityAction> fallback = new Vector<>();
+            sendAttackData(shooter.getId(), fallback);
+        }
+    }
+
+
+    /**
+     * Ends a firing turn that has no shooter to declare for. A plain {@code return} is treated as success by
+     * {@link BotClient#calculateMyTurnWorker(boolean)}, so without an empty attack the turn is never resolved and
+     * the bot falls silent. Mirrors what {@code calculateMyTurnWorker} already does for the physical phase.
+     *
+     * @param reason why no shooter could be determined, for the log
+     */
+    private void clearFiringTurnWithoutShooter(String reason) {
+        int firstEntityId = Entity.NONE;
+        try {
+            firstEntityId = getGame().getFirstEntityNum(getMyTurn());
+        } catch (Exception exception) {
+            LOGGER.error(exception, "Could not find a fallback entity to clear the firing turn with.");
+        }
+
+        if (firstEntityId == Entity.NONE) {
+            LOGGER.warn("{}, and the game has no entity to fall back on; skipping the firing turn.", reason);
+            return;
+        }
+
+        LOGGER.warn("{}; sending an empty attack for entity ID {} so the turn is not lost.", reason, firstEntityId);
+        sendAttackData(firstEntityId, new Vector<>());
+    }
+
+    /**
+     * Calculates the targeting/ off board turn This includes firing TAG and non-direct-fire artillery
+     */
+    @Override
+    protected void calculateTargetingOffBoardTurn() {
+        Entity entityToFire = getGame().getFirstEntity(getMyTurn());
+
+        if (entityToFire == null) {
+            // Same hole as calculateFiringTurn: the game can legitimately report no eligible entity, and every
+            // use below dereferences this one. The turn still has to be declared done, exactly as the normal
+            // path does at the end of this method, or the targeting phase never advances.
+            LOGGER.warn("No entity is eligible for the targeting turn; declaring it done without acting.");
+            sendDone(true);
+            return;
+        }
+
+        // if we're crippled, off-board and can do so, disengage. An off-board unit disengages once crippled whatever
+        // the bot's forced withdrawal setting, unless a gamemaster ordered otherwise.
+        boolean canDisengage = entityToFire.isOffBoard() && entityToFire.canFlee(entityToFire.getPosition());
+        boolean wantsToDisengage = entityToFire.getForcedWithdrawalOrder()
+              .isWithdrawing(true, entityToFire.isCrippled(true));
+        if (canDisengage && wantsToDisengage) {
+            Vector<EntityAction> disengageVector = new Vector<>();
+            disengageVector.add(new DisengageAction(entityToFire.getId()));
+            sendAttackData(entityToFire.getId(), disengageVector);
+            sendDone(true);
+            return;
+        }
+
+        FiringPlan firingPlan = getArtilleryTargetingControl().calculateIndirectArtilleryPlan(entityToFire,
+              getGame(),
+              this);
+
+        Vector<EntityAction> actions;
+        if (!firingPlan.getEntityActionVector().isEmpty()) {
+            LOGGER.info("{}: targeting phase turn for {}: sending {} attack action(s)",
+                  getLocalPlayer().getName(), entityToFire.getDisplayName(),
+                  firingPlan.getEntityActionVector().size());
+            actions = new Vector<>(firingPlan.getEntityActionVector());
+        } else {
+            LOGGER.info("{}: targeting phase turn for {}: no artillery attacks planned",
+                  getLocalPlayer().getName(), entityToFire.getDisplayName());
+            if (fireControls == null) {
+                initializeFireControls();
+            }
+            actions = new Vector<>(getFireControl(entityToFire).getUnjamWeaponPlan(entityToFire));
+        }
+        ReconCameraSpotAction cameraSpot = ReconCameraPlanner.planSpot(getGame(), entityToFire);
+        if (cameraSpot != null) {
+            actions.add(cameraSpot);
+        }
+        sendAttackData(entityToFire.getId(), actions);
+        sendDone(true);
+    }
+
+    protected Map<WeaponMounted, Double> calcAmmoConservation(final Entity shooter) {
+        final double aggroFactor = getBehaviorSettings().getHyperAggressionIndex();
+        final StringBuilder msg = new StringBuilder("\nCalculating ammo conservation for ").append(shooter.getDisplayName());
+        msg.append("\nAggression Factor = ").append(aggroFactor);
+
+        try {
+            final Map<AmmoType, Integer> ammoCounts = new HashMap<>();
+            msg.append("\nPooling Ammo:");
+            for (final Mounted<?> ammo : shooter.getAmmo()) {
+                final AmmoType ammoType = (AmmoType) ammo.getType();
+                msg.append("\n\t").append(ammoType);
+                if (ammoCounts.containsKey(ammoType)) {
+                    ammoCounts.put(ammoType, ammoCounts.get(ammoType) + ammo.getUsableShotsLeft());
+                    msg.append(" + ").append(ammo.getUsableShotsLeft()).append(" = ").append(ammoCounts.get(ammoType));
+                    continue;
+                }
+                ammoCounts.put(ammoType, ammo.getUsableShotsLeft());
+                msg.append(" + ").append(ammo.getUsableShotsLeft()).append(" = ").append(ammoCounts.get(ammoType));
+            }
+
+            final Map<WeaponMounted, Double> ammoConservation = new HashMap<>();
+            msg.append("\nCalculating conservation for each weapon");
+            for (final WeaponMounted weapon : shooter.getWeaponList()) {
+                final WeaponType weaponType = weapon.getType();
+                msg.append("\n\t").append(weapon);
+                if (!(weaponType instanceof AmmoWeapon)) {
+                    // Just require a 12 or lower TN
+                    ammoConservation.put(weapon, 0.01);
+                    msg.append(" doesn't use ammo.");
+                    continue;
+                } else if (weaponType.hasFlag(WeaponType.F_ONE_SHOT)) {
+                    // Shoot OS weapons on a 10 / 9 / 8 for Aggro 10 / 5 / 0
+                    ammoConservation.put(weapon, (35 - 2.0 * aggroFactor) / 100.0);
+                    msg.append(" One Shot weapon.");
+                    continue;
+                }
+
+                int ammoCount = 0;
+                for (final AmmoType ammoType : ammoCounts.keySet()) {
+                    if (!AmmoType.isAmmoValid(ammoType, weaponType)) {
+                        continue;
+                    }
+                    ammoCount += ammoCounts.get(ammoType);
+                }
+                // Launchers that share a pool each get their part of it, or ten launchers on ten shots would each
+                // fire as if all ten were theirs
+                final int sharingLaunchers = countLaunchersSharingAmmo(shooter, weaponType, ammoCounts.keySet());
+                final int pooledShots = ammoCount;
+                ammoCount = (pooledShots + sharingLaunchers - 1) / sharingLaunchers;
+                msg.append(" has ").append(pooledShots).append(" shots left, shared by ").append(sharingLaunchers)
+                      .append(" launchers: ").append(ammoCount).append(" each");
+                // Desired behavior, with 7 / 3 / 1 rounds left:
+                // At min aggro (0 of 10), fire on TN 10, 9, 7
+                // At normal aggro (5 of 10), fire on 12, 11, 10
+                // At max aggro (10 of 10), fire on 12, 12, 10
+                final double toHitThreshold = Math.max(0.01,
+                      (0.6 / ((8 * aggroFactor) + 4) +
+                            4.0 / (4 * (ammoCount * ammoCount) * (aggroFactor + 2) + (4 / (aggroFactor + 1)))));
+                msg.append("; To Hit Threshold = ").append(new DecimalFormat("0.000").format(toHitThreshold));
+                ammoConservation.put(weapon, toHitThreshold);
+            }
+
+            return ammoConservation;
+        } finally {
+            LOGGER.debug(msg.toString());
+        }
+    }
+
+    /**
+     * Counts the ammo-using weapons on the shooter that can fire the same ammo as the given weapon, the weapon itself
+     * included.
+     *
+     * @param shooter    the unit whose weapons are counted
+     * @param weaponType the weapon whose ammo is being shared
+     * @param ammoTypes  the ammo types the shooter carries
+     *
+     * @return how many launchers draw on that ammo, at least 1
+     */
+    private static int countLaunchersSharingAmmo(final Entity shooter, final WeaponType weaponType,
+          final Set<AmmoType> ammoTypes) {
+        final List<AmmoType> usableAmmoTypes = new ArrayList<>();
+        for (final AmmoType ammoType : ammoTypes) {
+            if (AmmoType.isAmmoValid(ammoType, weaponType)) {
+                usableAmmoTypes.add(ammoType);
+            }
+        }
+        int launchers = 0;
+        for (final WeaponMounted otherWeapon : shooter.getWeaponList()) {
+            final WeaponType otherWeaponType = otherWeapon.getType();
+            final boolean isReloadable = (otherWeaponType instanceof AmmoWeapon)
+                  && !otherWeaponType.hasFlag(WeaponType.F_ONE_SHOT);
+            if (isReloadable && firesAnyOf(otherWeaponType, usableAmmoTypes)) {
+                launchers++;
+            }
+        }
+        return Math.max(1, launchers);
+    }
+
+    /**
+     * @return {@code true} if the weapon can fire at least one of the given ammo types
+     */
+    private static boolean firesAnyOf(final WeaponType weaponType, final List<AmmoType> ammoTypes) {
+        for (final AmmoType ammoType : ammoTypes) {
+            if (AmmoType.isAmmoValid(ammoType, weaponType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Worker method that calculates a point blank shot action vector given a firing entity ID and a target ID.
+     *
+     * @param firingEntityID the ID of the entity taking the point blank shot
+     * @param targetID       the ID of the entity being shot at potentially
+     */
+    @Override
+    protected Vector<EntityAction> calculatePointBlankShot(int firingEntityID, int targetID) {
+        Entity shooter = getGame().getEntity(firingEntityID);
+        Targetable target = getGame().getEntity(targetID);
+        if ((shooter == null) || (target == null)) {
+            return new Vector<>();
+        }
+
+        final FiringPlanCalculationParameters firingPlanCalculationParameters = new Builder().buildExact(shooter,
+              target,
+              calcAmmoConservation(shooter));
+        FiringPlan plan = getFireControl(shooter).determineBestFiringPlan(firingPlanCalculationParameters);
+        getFireControl(shooter).loadAmmo(shooter, plan);
+        plan.sortPlan();
+
+        return plan.getEntityActionVector();
+    }
+
+    /**
+     * Calculates the move index for the given unit. In general, faster units and units closer to the enemy should move
+     * before others. Additional modifiers for being prone, stealth-ed, unit type and so on are also factored in.
+     *
+     * @param entity The unit to be indexed.
+     *
+     * @return The movement index of this unit. May be positive or negative. Higher index values should move first.
+     */
+    protected double calculateMoveIndex(final Entity entity, final StringBuilder msg) {
+        final double PRIORITY_PRONE = 1.1;
+        final double PRIORITY_TANK = 1.5;
+        final double PRIORITY_BA = 2;
+        final double PRIORITY_INF = 3;
+        final double PRIORITY_FALLBACK = 2;
+        final double PRIORITY_COMMANDER = 0.5;
+        final double PRIORITY_CIVILIAN = 5;
+        final double PRIORITY_STEALTH = 1.0 / 3;
+
+        msg.append("\n\tCalculating move index for ").append(entity.getDisplayName());
+        final StringBuilder modifiers = new StringBuilder();
+        final NumberFormat numberFormat = DecimalFormat.getInstance();
+        double total = 0;
+        try {
+            // Find out how fast this unit can move.
+            int fastestMove = entity.getRunMP(MPCalculationSetting.STANDARD);
+            if (entity.getAnyTypeMaxJumpMP() > fastestMove) {
+                fastestMove = entity.getAnyTypeMaxJumpMP();
+            }
+            msg.append("\n\t\tFastest Move = ").append(fastestMove);
+
+            // Get the distance to the nearest enemy.
+            final double distance = getPathRanker(entity).distanceToClosestEnemy(entity, entity.getPosition(), game);
+
+            msg.append("\n\t\tDistance to Nearest Enemy: ").append(numberFormat.format(distance));
+
+            // Get the ratio of distance to speed.
+            // Faster units that are closer to the enemy should move later.
+            if (0 == fastestMove) {
+                // This unit should have already moved due to the isImmobilized check.
+                total = distance * 2;
+            } else {
+                total = distance / fastestMove;
+            }
+            msg.append("\n\t\tDistance to Move Ratio (dist / move): ").append(numberFormat.format(total));
+
+            // Prone enemies move sooner.
+            if (entity.isProne()) {
+                total *= PRIORITY_PRONE;
+                modifiers.append("\tx1.1 (Is Prone)");
+            }
+
+            // If all else is equal, Infantry before Battle Armor before Tanks before Meks.
+            switch (entity) {
+                case BattleArmor ignored -> {
+                    total *= PRIORITY_BA;
+                    modifiers.append("\tx2.0 (is BA)");
+                }
+                case Infantry ignored -> {
+                    total *= PRIORITY_INF;
+                    modifiers.append("\tx3.0 (is Inf)");
+                }
+                case Tank ignored -> {
+                    total *= PRIORITY_TANK;
+                    modifiers.append("\tx1.5 (is Tank)");
+                }
+                default -> {
+                }
+            }
+
+            // Fleeing entities should move before those not fleeing.
+            if (isFallingBack(entity)) {
+                total *= PRIORITY_FALLBACK;
+                modifiers.append("\tx2.0 (is Fleeing)");
+            }
+
+            // Move commanders after other units.
+            if (entity.isCommander()) {
+                total *= PRIORITY_COMMANDER;
+                modifiers.append("\tx0.5 (is Commander)");
+            }
+
+            // Move civilian units before military.
+            if (!entity.isMilitary()) {
+                total *= PRIORITY_CIVILIAN;
+                modifiers.append("\tx5.0 (is Civilian)");
+            }
+
+            // Move stealthy units later.
+            if (entity.isStealthActive() || entity.isStealthOn() || entity.isVoidSigActive() || entity.isVoidSigOn()) {
+                total *= PRIORITY_STEALTH;
+                modifiers.append("\tx1/3 (is Stealth-ed)");
+            }
+
+            return total;
+        } finally {
+            msg.append("\n\t\tModifiers:").append(modifiers);
+            msg.append("\n\t\tTotal = ").append(numberFormat.format(total));
+        }
+    }
+
+
+    // Enhanced targeting controls
+
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public boolean getEnhancedTargetingControl() {
+        return enableEnhancedTargeting;
+    }
+
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public void setEnableEnhancedTargeting(boolean newSetting) {
+        enableEnhancedTargeting = newSetting;
+    }
+
+    /**
+     * Sets all enhanced targeting controls to default values and optionally enables its use
+     *
+     * @param enable true to immediately enable enhanced targeting features after reset
+     */
+    public void resetEnhancedTargeting(boolean enable) {
+
+        // Toggle enhanced targeting
+        enableEnhancedTargeting = enable;
+
+        // Set default enhanced targeting target and attacker types
+        enhancedTargetingTargetTypes = new ArrayList<>(List.of(UnitType.MEK));
+        enhancedTargetingAttackerTypes = new ArrayList<>(Arrays.asList(UnitType.MEK,
+              UnitType.TANK,
+              UnitType.BATTLE_ARMOR,
+              UnitType.INFANTRY,
+              UnitType.PROTOMEK,
+              UnitType.VTOL,
+              UnitType.GUN_EMPLACEMENT));
+
+        // Set default as not using called shots against immobile targets
+        useCalledShotsOnImmobileTarget = false;
+
+        // Set default as not allowing enhanced targeting if the target has partial cover.
+        // This prevents all sorts of issues, such as aiming for locations that are covered.
+        allowCoverEnhancedTargeting = false;
+
+    }
+
+    /**
+     * Swap out current set of valid enhanced targeting target types for a new set. Automatically removes certain types
+     * that will never apply, such as infantry.
+     *
+     * @param newTargetTypes List of {@link UnitType} constants, may be empty or null to clear
+     */
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public void setEnhancedTargetingTargetTypes(List<Integer> newTargetTypes) {
+        enhancedTargetingTargetTypes = Objects.requireNonNullElseGet(newTargetTypes, ArrayList::new);
+        if (enhancedTargetingTargetTypes.contains(UnitType.INFANTRY)) {
+            enhancedTargetingTargetTypes.remove(UnitType.INFANTRY);
+        }
+        if (enhancedTargetingTargetTypes.contains(UnitType.BATTLE_ARMOR)) {
+            enhancedTargetingTargetTypes.remove(UnitType.BATTLE_ARMOR);
+        }
+    }
+
+    /**
+     * Swap out current set of valid enhanced targeting attacker types for a new set
+     *
+     * @param newAttackerTypes List of {@link UnitType} constants, may be empty or null to clear
+     */
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public void setEnhancedTargetingAttackerTypes(List<Integer> newAttackerTypes) {
+        enhancedTargetingAttackerTypes = Objects.requireNonNullElseGet(newAttackerTypes, ArrayList::new);
+    }
+
+    /**
+     * Returns a copy of the list of valid enhanced targeting target types
+     *
+     * @return list of {@link UnitType} constants, or empty list
+     */
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public List<Integer> seeEnhancedTargetingTargetTypes() {
+        return new ArrayList<>(enhancedTargetingTargetTypes);
+    }
+
+    /**
+     * Returns a copy of the list of valid enhanced targeting attacker types
+     *
+     * @return list of {@link UnitType} constants, or empty list
+     */
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public List<Integer> seeEnhancedTargetingAttackerTypes() {
+        return new ArrayList<>(enhancedTargetingAttackerTypes);
+    }
+
+    /**
+     * Checks if the supplied unit type is considered a valid target for enhanced targeting
+     *
+     * @param testType {@link UnitType} constant
+     *
+     * @return true, if unit is a valid target for enhanced targeting
+     */
+    public boolean isValidEnhancedTargetingTarget(int testType) {
+        if (enhancedTargetingTargetTypes != null) {
+            return enhancedTargetingTargetTypes.contains(testType);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Checks if the supplied unit type is considered a valid attacker for enhanced targeting
+     *
+     * @param testType {@link UnitType} constant
+     *
+     * @return true, if unit is a valid attacker for enhanced targeting
+     */
+    public boolean isValidEnhancedTargetingAttacker(int testType) {
+        if (enhancedTargetingAttackerTypes != null) {
+            return enhancedTargetingAttackerTypes.contains(testType);
+        } else {
+            return false;
+        }
+    }
+
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public boolean getAllowCalledShotsOnImmobile() {
+        return useCalledShotsOnImmobileTarget;
+    }
+
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public void setAllowCalledShotsOnImmobile(boolean newSetting) {
+        useCalledShotsOnImmobileTarget = newSetting;
+    }
+
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public boolean getPartialCoverEnhancedTargeting() {
+        return allowCoverEnhancedTargeting;
+    }
+
+    /**
+     * Controls whether enhanced targeting will be used against targets with partial cover from the shooter. Use with
+     * caution as this can result in situations like aiming for a location which is protected by intervening cover.
+     *
+     * @param newSetting true, to allow aimed/called shots against targets with partial cover
+     */
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public void setPartialCoverEnhancedTargeting(boolean newSetting) {
+        allowCoverEnhancedTargeting = newSetting;
+    }
+
+    /**
+     * Determine if a shooter should consider using enhanced targeting - aimed or called shots - against a given target.
+     * This includes some basic filtering for unit types and equipment such targeting computers.
+     *
+     * @param shooter    Entity doing the shooting
+     * @param targetable Hex, Building, or Entity being shot at (Enhanced Targeting only works on the last one)
+     * @param cover      {@link LosEffects} constant for partial cover, derived from {@code ToHitData.getCover()}
+     *
+     * @return true, if aimed or called shots should be checked
+     */
+    protected boolean checkForEnhancedTargeting(Entity shooter, Targetable targetable, int cover) {
+        // Only works on entities
+        if (!(targetable instanceof Entity target)) {
+            return false;
+        }
+
+        if (!enableEnhancedTargeting) {
+            return false;
+        }
+
+        // Partial cover adds all sorts of complications, don't bother unless enabled
+        if (cover != LosEffects.COVER_NONE && !allowCoverEnhancedTargeting) {
+            return false;
+        }
+
+        // Basic unit type filtering for shooter. Ejected crews are considered infantry, so need
+        // to be specifically checked.
+        if (!isValidEnhancedTargetingAttacker(shooter.getUnitType()) || shooter instanceof EjectedCrew) {
+            return false;
+        }
+
+        if (!isValidEnhancedTargetingTarget(target.getUnitType())) {
+            return false;
+        }
+
+        boolean useAimedShot = false;
+        boolean useCalledShot = false;
+
+        // Only certain unit types can be the target of aimed shots
+        List<Integer> validAimTypes = new ArrayList<>(Arrays.asList(UnitType.MEK,
+              UnitType.TANK,
+              UnitType.VTOL,
+              UnitType.CONV_FIGHTER,
+              UnitType.AEROSPACE_FIGHTER));
+
+        if (validAimTypes.contains(target.getUnitType())) {
+
+            // Aimed shots are only possible if the target is immobile or the shooter has a
+            // targeting computer
+            if (target.isImmobile() || shooter.hasTargComp()) {
+                useAimedShot = true;
+            }
+        }
+
+        if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_COMBAT_TAC_OPS_CALLED_SHOTS)) {
+            // Called shots against immobile targets can be a little too effective, so only use
+            // when enabled
+            if (!target.isImmobile() || useCalledShotsOnImmobileTarget) {
+                useCalledShot = true;
+            }
+        }
+
+        return useAimedShot || useCalledShot;
+    }
+
+    /**
+     * Determine which location to aim for on a general target. Returned location constant is relative to the provided
+     * target type. Currently only supports aimed shots against Meks.
+     *
+     * @param target       Entity being shot at
+     * @param planOfAttack Proposed attacks against {@code target}
+     * @param rearAttack   true if attacking from rear arc
+     * @param includeHead  true if the head is a valid location, ignored for non-Mek targets
+     *
+     * @return location constant to aim for, with the {@code LOC_NONE} constant indicating no suitable location
+     */
+    protected int getAimedShotLocation(Targetable target, FiringPlan planOfAttack, boolean rearAttack,
+          boolean includeHead) {
+
+        int aimLocation = Entity.LOC_NONE;
+        if (planOfAttack == null || target == null) {
+            return aimLocation;
+        }
+
+        // Only check attacks if the target has locations that can be aimed for, which can be
+        // aimed, and are against the designated target
+        List<Integer> validAimTypes = new ArrayList<>(Arrays.asList(UnitType.MEK,
+              UnitType.TANK,
+              UnitType.VTOL,
+              UnitType.CONV_FIGHTER,
+              UnitType.AEROSPACE_FIGHTER));
+
+        if (!validAimTypes.contains(((Entity) target).getUnitType())) {
+            return aimLocation;
+        }
+
+        List<WeaponFireInfo> workingShots = planOfAttack.stream()
+              .filter(curShot -> curShot.getTarget().getId() == target.getId())
+              .filter(curShot -> Compute.allowAimedShotWith(curShot.getWeapon(),
+                    target.isImmobile() ?
+                          AimingMode.IMMOBILE :
+                          AimingMode.TARGETING_COMPUTER))
+              .collect(Collectors.toList());
+
+        if (workingShots.isEmpty()) {
+            return aimLocation;
+        }
+
+        // Each type of unit requires its own checking process due to unique locations.
+        // TODO: placeholders are used for non-Mek targets. Create appropriate methods for each.
+        if (((Entity) target).getUnitType() == UnitType.MEK) {
+            aimLocation = calculateAimedShotLocation((Mek) target, workingShots, rearAttack, includeHead);
+        }
+
+        return aimLocation;
+    }
+
+    /**
+     * Determine which direction to make a called shot - left, right, high, or low. Some target types only support
+     * calling shots left or right. Currently only supports called shots against Meks.
+     *
+     * @param target       Entity being shot at
+     * @param attackSide   {@link ToHitData} SIDE_ constant, indicating attack direction relative to target
+     * @param planOfAttack Proposed attacks against {@code target}
+     *
+     * @return {@link CalledShot} constant indicating which direction to call, may return
+     *       {@code CalledShot.CALLED_NONE}.
+     */
+    protected int getCalledShotDirection(Targetable target, int attackSide, FiringPlan planOfAttack) {
+        int calledShotDirection = CalledShot.CALLED_NONE;
+        if (planOfAttack == null || target == null) {
+            return calledShotDirection;
+        }
+
+        WeaponFireInfo primaryFire = planOfAttack.getFirst();
+        if (primaryFire == null) {
+            return calledShotDirection;
+        }
+
+        // Limit the weapons fire to those against the designated target and which have a
+        // reasonable to-hit number
+        int maximumToHit = calcEnhancedTargetingMaxTN(false);
+        List<WeaponFireInfo> workingShots = planOfAttack.stream()
+              .filter(curShot -> curShot.getTarget().getId() == target.getId())
+              .filter(curShot -> curShot.getToHit().getValue() +
+                    CALLED_SHOT_MODIFIER <= maximumToHit)
+              .collect(Collectors.toList());
+
+        if (workingShots.isEmpty()) {
+            return calledShotDirection;
+        }
+
+        // TODO: placeholder for non-Mek targets. Create appropriate methods for each.
+        if (target instanceof Mek) {
+            calledShotDirection = calculateCalledShotDirection((Mek) target, attackSide, workingShots);
+        }
+
+        return calledShotDirection;
+    }
+
+    /**
+     * Determine which location to aim for on a Mek. Prioritizes torsos and legs, and ignores destroyed locations.
+     * Prefers right to left, given that most non-symmetrical Meks are 'right-handed'.
+     *
+     * @param target      Mek being shot at
+     * @param aimedShots  Proposed attacks against {@code target}
+     * @param rearAttack  true if attacking from the rear arc
+     * @param includeHead true to include the head as a valid location
+     *
+     * @return {@link Mek} constant for location to shoot, or {@code Mek.LOC_NONE} for none
+     */
+    protected int calculateAimedShotLocation(Mek target, List<WeaponFireInfo> aimedShots, boolean rearAttack,
+          boolean includeHead) {
+        int aimLocation = Mek.LOC_NONE;
+
+        if (aimedShots == null || target == null) {
+            return aimLocation;
+        }
+
+        WeaponFireInfo primaryFire = aimedShots.getFirst();
+        int lowestArmor = Integer.MAX_VALUE;
+        List<Integer> rankedLocations = new ArrayList<>();
+
+        // Aiming for the head can only be done against an immobile Mek, and takes a penalty.
+        // Don't aim for the head for anti-Mek attacks except after swarming.
+        if (includeHead &&
+              target.isImmobile() &&
+              !primaryFire.getWeapon().getShortName().equalsIgnoreCase(Infantry.LEG_ATTACK) &&
+              !primaryFire.getWeapon().getShortName().equalsIgnoreCase(Infantry.SWARM_MEK) &&
+              !primaryFire.getWeapon().getShortName().equalsIgnoreCase(Infantry.STOP_SWARM)) {
+            aimLocation = Mek.LOC_HEAD;
+            int headShotMaxTN = calcEnhancedTargetingMaxTN(false);
+            if (aimedShots.stream()
+                  .anyMatch(curFire -> curFire.getToHit().getValue() + IMMOBILE_HEAD_SHOT_MODIFIER >
+                        headShotMaxTN)) {
+                aimLocation = Mek.LOC_NONE;
+            } else {
+                return aimLocation;
+            }
+        }
+
+        // Limit leg attack aimed shots to the legs
+        if (!primaryFire.getWeapon().getShortName().equalsIgnoreCase(Infantry.LEG_ATTACK)) {
+
+            // Consider arm locations if they have a 'big' weapon
+            for (WeaponMounted curWeapon : target.getWeaponList()
+                  .stream()
+                  .filter(w -> w.isOperable() && isBigGun(w))
+                  .collect(Collectors.toSet())) {
+
+                if (!rankedLocations.contains(Mek.LOC_RIGHT_ARM) &&
+                      curWeapon.getLocation() == Mek.LOC_RIGHT_ARM &&
+                      target.getInternal(Mek.LOC_RIGHT_ARM) > 0) {
+                    rankedLocations.add(Mek.LOC_RIGHT_ARM);
+                } else if (!rankedLocations.contains(Mek.LOC_LEFT_ARM) &&
+                      curWeapon.getLocation() == Mek.LOC_LEFT_ARM &&
+                      target.getInternal(Mek.LOC_LEFT_ARM) > 0) {
+                    rankedLocations.add(Mek.LOC_LEFT_ARM);
+                }
+                if (rankedLocations.contains(Mek.LOC_RIGHT_ARM) && rankedLocations.contains(Mek.LOC_LEFT_ARM)) {
+                    break;
+                }
+
+            }
+
+            // Most Mek designs will have their main weapon in either the right torso or right arm,
+            // so going after the right torso first solves both conditions. Putting the right torso
+            // first ensures the left torso and other locations will only supersede it if they have
+            // taken more damage and make for a better target.
+            if (target.getInternal(Mek.LOC_RIGHT_TORSO) > 0) {
+                rankedLocations.add(Mek.LOC_RIGHT_TORSO);
+            } else if (target.getInternal(Mek.LOC_LEFT_TORSO) > 0) {
+                rankedLocations.add(Mek.LOC_LEFT_TORSO);
+            }
+
+            if (!rankedLocations.contains(Mek.LOC_LEFT_TORSO)) {
+                if (target.getInternal(Mek.LOC_LEFT_TORSO) > 0) {
+                    rankedLocations.add((Mek.LOC_LEFT_TORSO));
+                }
+            }
+
+            rankedLocations.add(Mek.LOC_CENTER_TORSO);
+        }
+
+        // Favor right leg over left due to damage transfer to right torso, except if right leg is
+        // completely gone
+        if (target.getInternal(Mek.LOC_RIGHT_LEG) > 0) {
+            rankedLocations.add(Mek.LOC_RIGHT_LEG);
+        } else if (target.getInternal(Mek.LOC_LEFT_LEG) > 0) {
+            rankedLocations.add(Mek.LOC_LEFT_LEG);
+        }
+
+        if (!rankedLocations.contains(Mek.LOC_LEFT_LEG)) {
+            if (target.getInternal(Mek.LOC_LEFT_LEG) > 0) {
+                rankedLocations.add(Mek.LOC_LEFT_LEG);
+            }
+        }
+
+        // Select the most vulnerable location
+        int locationDestruction = 0;
+        for (int curLocation : rankedLocations) {
+            int locationArmor = Math.max(target.hasRearArmor(curLocation) ?
+                  target.getArmor(curLocation, rearAttack) :
+                  target.getArmor(curLocation), 0);
+
+            if (target.getInternal(curLocation) > 0 &&
+                  (lowestArmor > locationArmor ||
+                        locationDestruction > locationArmor + target.getInternal(curLocation))) {
+
+                aimLocation = curLocation;
+                lowestArmor = locationArmor;
+                locationDestruction = lowestArmor + target.getInternal(aimLocation);
+
+            }
+
+            // Doesn't get any better than a torso with no armor
+            if (lowestArmor == 0 &&
+                  (aimLocation == Mek.LOC_RIGHT_TORSO
+                        || aimLocation == Mek.LOC_LEFT_TORSO
+                        || aimLocation == Mek.LOC_CENTER_TORSO)) {
+                break;
+            }
+        }
+        // Evaluate whether all the weapons at the chosen location will be effective
+        if (aimLocation != Mek.LOC_NONE && (!target.isImmobile() || aimLocation == Mek.LOC_HEAD)) {
+
+            int offset = 0;
+            if (locationDestruction <= LOCATION_DESTRUCTION_THREAT) {
+                offset = 1;
+            }
+
+            int penetratorCount = 0;
+            double totalDamage = 0;
+            int maximumToHit = calcEnhancedTargetingMaxTN(target.isImmobile() && aimLocation != Mek.LOC_HEAD);
+            for (WeaponFireInfo curFire : aimedShots) {
+                if (curFire.getToHit().getValue() +
+                      (aimLocation == Mek.LOC_HEAD ? IMMOBILE_HEAD_SHOT_MODIFIER : AIMED_SHOT_MODIFIER) <=
+                      (maximumToHit + offset)) {
+
+                    totalDamage += curFire.getMaxDamage();
+                    if (curFire.getMaxDamage() >= lowestArmor) {
+                        penetratorCount++;
+                    }
+
+                }
+            }
+
+            // If none of the weapons have a low enough to-hit number, or if none of the weapons
+            // can penetrate the armor individually or cumulatively, don't bother aiming
+            if (totalDamage == 0 || (penetratorCount == 0 && 0.4 * totalDamage < lowestArmor)) {
+                aimLocation = Mek.LOC_NONE;
+            }
+
+        }
+
+        return aimLocation;
+    }
+
+    /**
+     * Determine which direction to make a called shot against a Mek - left, right, high, or low. Shots into a side arc
+     * will be called to become rear shots. Shots to the front or rear will call high or low based on how many locations
+     * have minimal armor.
+     *
+     * @param target      Mek being shot at
+     * @param attackSide  {@link ToHitData} SIDE_ constant, indicating attack direction relative to target
+     * @param calledShots Proposed attacks against {@code target} parameter
+     *
+     * @return {@link CalledShot} constant indicating which direction to call, may return
+     *       {@code CalledShot.CALLED_NONE}.
+     */
+    protected int calculateCalledShotDirection(Mek target, int attackSide, List<WeaponFireInfo> calledShots) {
+        int calledShotDirection = CalledShot.CALLED_NONE;
+
+        if (calledShots == null || calledShots.isEmpty() || calledShots.getFirst() == null) {
+            return calledShotDirection;
+        }
+
+        WeaponFireInfo primaryFire = calledShots.getFirst();
+
+        // If the target is being shot in a side arc, set the call direction to hit the rear arc
+        if (attackSide == ToHitData.SIDE_LEFT || attackSide == ToHitData.SIDE_REAR_LEFT) {
+            calledShotDirection = CalledShot.CALLED_RIGHT;
+        } else if (attackSide == ToHitData.SIDE_RIGHT || attackSide == ToHitData.SIDE_REAR_RIGHT) {
+            calledShotDirection = CalledShot.CALLED_LEFT;
+        }
+
+        if (attackSide == ToHitData.SIDE_FRONT || attackSide == ToHitData.SIDE_REAR) {
+
+            List<Integer> upperLocations = new ArrayList<>(Arrays.asList(Mek.LOC_RIGHT_TORSO,
+                  Mek.LOC_LEFT_TORSO,
+                  Mek.LOC_CENTER_TORSO));
+
+            // Only consider the arms if they have 'big' weapons
+            for (WeaponMounted curWeapon : target.getWeaponList()
+                  .stream()
+                  .filter(w -> w.isOperable() && isBigGun(w))
+                  .collect(Collectors.toSet())) {
+
+                if (!upperLocations.contains(Mek.LOC_RIGHT_ARM) &&
+                      curWeapon.getLocation() == Mek.LOC_RIGHT_ARM &&
+                      target.getInternal(Mek.LOC_RIGHT_ARM) > 0) {
+                    upperLocations.add(Mek.LOC_RIGHT_ARM);
+                } else if (!upperLocations.contains(Mek.LOC_LEFT_ARM) &&
+                      curWeapon.getLocation() == Mek.LOC_LEFT_ARM &&
+                      target.getInternal(Mek.LOC_LEFT_ARM) > 0) {
+                    upperLocations.add(Mek.LOC_LEFT_ARM);
+                }
+                if (upperLocations.contains(Mek.LOC_RIGHT_ARM) && upperLocations.contains(Mek.LOC_LEFT_ARM)) {
+                    break;
+                }
+
+            }
+
+            // Establish a maximum armor value for calling shots high/low. If most
+            // of the locations have more armor than this, it's not a good option.
+            // Infantry and battle armor weapons rely on many small hits, so use
+            // a default value.
+            int armorThreshold;
+            Entity shooter = primaryFire.getShooter();
+            if (!shooter.isInfantry()) {
+                OptionalDouble averageDamage = calledShots.stream().mapToDouble(WeaponFireInfo::getMaxDamage).average();
+                if (averageDamage.isPresent()) {
+                    armorThreshold = (int) Math.floor(averageDamage.getAsDouble());
+                } else {
+                    armorThreshold = CALLED_SHOT_DEFAULT_MAX_ARMOR;
+                }
+            } else {
+                armorThreshold = CALLED_SHOT_DEFAULT_MAX_ARMOR;
+            }
+
+            double upperTargets = upperLocations.stream()
+                  .mapToInt(loc -> loc)
+                  .filter(loc -> target.getArmor(loc, attackSide == ToHitData.SIDE_REAR) <=
+                        armorThreshold)
+                  .count();
+
+            // Only consider shooting low if both legs are intact
+            double lowerTargets = 0;
+            if (target.getInternal(Mek.LOC_RIGHT_LEG) > 0 && target.getInternal(Mek.LOC_LEFT_LEG) > 0) {
+                if (target.getArmor(Mek.LOC_RIGHT_LEG) <= armorThreshold) {
+                    lowerTargets++;
+                }
+                if (target.getArmor(Mek.LOC_LEFT_LEG) <= armorThreshold) {
+                    lowerTargets++;
+                }
+            }
+
+            // If the head armor is weak or there are proportionally more upper targets, call high.
+            // If the leg armor is weak and this is a fast and/or jumping Mek, call low.
+            if (target.getArmor(Mek.LOC_HEAD) + target.getInternal(Mek.LOC_HEAD) <= LOCATION_DESTRUCTION_THREAT ||
+                  (upperTargets / upperLocations.size() > lowerTargets / 2.0)) {
+                calledShotDirection = CalledShot.CALLED_HIGH;
+            } else if (lowerTargets >= 1 ||
+                  target.getWalkMP() >= CALLED_SHOT_MIN_MOVE ||
+                  target.getAnyTypeMaxJumpMP() >= CALLED_SHOT_MIN_JUMP) {
+                calledShotDirection = CalledShot.CALLED_LOW;
+            }
+
+        }
+
+        return calledShotDirection;
+    }
+
+
+    /**
+     * Checks if a weapon is considered a 'big gun' worth taking a shot at
+     *
+     * @param testWeapon weapon to check
+     *
+     * @return true if weapon damage exceeds {@code BIG_GUN_MIN_DAMAGE} at a typical range value
+     */
+    private boolean isBigGun(WeaponMounted testWeapon) {
+        return testWeapon.getType().getDamage(BIG_GUN_TYPICAL_RANGE) >= BIG_GUN_MIN_DAMAGE;
+    }
+
+    /**
+     * Figure out the highest practical to-hit number for enhanced aiming (aimed/called shots), using behavior settings
+     *
+     * @param isAimedImmobile true if making aimed shot at immobile target
+     *
+     * @return maximum to-hit number for a weapons attack with enhanced aiming
+     */
+    private int calcEnhancedTargetingMaxTN(boolean isAimedImmobile) {
+        if (isAimedImmobile) {
+            return SHUTDOWN_MAX_TARGET_NUMBER;
+        } else {
+            return Math.max(10 - getBehaviorSettings().getSelfPreservationIndex(), 2);
+        }
+    }
+
+
+    /**
+     * If a shot meets criteria, set it as aimed or called.  {@code aimLocation} and {@code calledShotDirection} are not
+     * mutually exclusive - if both are provided, weapons which cannot make an aimed shot will make a called shot
+     * instead
+     *
+     * @param shot                 Single-weapon attack action
+     * @param aimLocation          {@link Mek} LOC_ constant with aiming location
+     * @param destructionThreshold how much damage to completely destroy the location
+     */
+    protected void setAttackAsAimedOrCalled(WeaponFireInfo shot, int aimLocation, int calledShotDirection,
+          int destructionThreshold) {
+        Entity shooter = shot.getShooter();
+
+        int offset = 0;
+
+        // If the target is a Mek and the attack is not artillery or non-damaging anti-Mek
+        if (shot.getTarget().getTargetType() == UnitType.MEK &&
+              !shot.getWeapon().getType().hasFlag(WeaponType.F_ARTILLERY) &&
+              !shot.getWeapon().getShortName().equalsIgnoreCase(Infantry.SWARM_MEK) &&
+              !shot.getWeapon().getShortName().equalsIgnoreCase(Infantry.STOP_SWARM)) {
+
+            Mek target = (Mek) shot.getTarget();
+            int maximumTN;
+
+            // If set for aimed shots, and the weapon can make aimed shots
+            if ((aimLocation != Mek.LOC_NONE) &&
+                  Compute.allowAimedShotWith(shot.getWeapon(),
+                        target.isImmobile() ? AimingMode.IMMOBILE : AimingMode.TARGETING_COMPUTER)) {
+
+                maximumTN = calcEnhancedTargetingMaxTN(target.isImmobile() && aimLocation != Mek.LOC_HEAD);
+
+                // Increase the maximum target number for attacks that may destroy the location,
+                // as well as infantry weapons which may have multiple hits per shot
+                if ((!shooter.isInfantry() && shot.getMaxDamage() >= destructionThreshold) ||
+                      shot.getWeapon().getType().hasFlag(WeaponType.F_INFANTRY)) {
+                    offset = 1;
+                }
+
+                // If the target number is considered viable set attack as aimed
+                // at the provided location
+                if ((shot.getToHit().getValue() + (target.isImmobile() ? 0 : AIMED_SHOT_MODIFIER)) <=
+                      (maximumTN + offset)) {
+                    shot.getAction()
+                          .setAimingMode(target.isImmobile() ? AimingMode.IMMOBILE : AimingMode.TARGETING_COMPUTER);
+                    shot.getAction().setAimedLocation(aimLocation);
+                }
+
+            } else if (calledShotDirection != CalledShot.CALLED_NONE) {
+
+                maximumTN = calcEnhancedTargetingMaxTN(false);
+
+                // If the weapon uses the cluster table, increase the maximum target number
+                if (shot.getWeapon().getType().getDamage() == WeaponType.DAMAGE_BY_CLUSTER_TABLE ||
+                      (shot.getAmmo() != null &&
+                            shot.getAmmo().getType().getMunitionType().contains(AmmoType.Munitions.M_CLUSTER)) ||
+                      shot.getWeapon().getType().hasFlag(WeaponType.F_INFANTRY)) {
+                    offset = 2;
+                }
+
+                // If the target number is considered viable, set the called shot directly
+                if ((shot.getToHit().getValue() + CALLED_SHOT_MODIFIER) <= (maximumTN + offset)) {
+                    sendCalledShotChange(shooter.getId(),
+                          shot.getWeaponAttackAction().getWeaponId(),
+                          calledShotDirection);
+                }
+
+            }
+
+        }
+
+    }
+
+
+    /**
+     * Gets an entity eligible to fire from a list contained in the fire control state.
+     */
+    Entity getEntityToFire(FireControlState fireControlState) {
+        if (fireControlState.getOrderedFiringEntities().isEmpty()) {
+            initFiringEntities(fireControlState);
+        }
+
+        // if, even after initializing entities, we have no valid entities
+        // we'll let the game determine
+        if (fireControlState.getOrderedFiringEntities().isEmpty()) {
+            return game.getFirstEntity(getMyTurn());
+        }
+
+        Entity entityToReturn = fireControlState.getOrderedFiringEntities().getFirst();
+        fireControlState.getOrderedFiringEntities().removeFirst();
+        return entityToReturn;
+    }
+
+    /**
+     * Sorts firing entities to ensure that entities that can do indirect fire go after entities that cannot, so that
+     * IDF units go after spotting units.
+     */
+    private void initFiringEntities(FireControlState fireControlState) {
+        List<Entity> myEntities = game.getPlayerEntities(getLocalPlayer(), true);
+        fireControlState.clearOrderedFiringEntities();
+
+        for (Entity entity : myEntities) {
+            // if you can't fire, you can't fire.
+            if (!getMyTurn().isValidEntity(entity, game)) {
+                continue;
+            }
+
+            if (getFireControl(entity).entityCanIndirectFireMissile(fireControlState, entity)) {
+                fireControlState.getOrderedFiringEntities().addLast(entity);
+            } else {
+                fireControlState.getOrderedFiringEntities().addFirst(entity);
+            }
+        }
+    }
+
+    /**
+     * Loops through the list of entities controlled by this Princess instance and decides which should be moved first.
+     * Immobile units and ejected MekWarriors / crews will be moved first. After that, each unit is given an index//
+     * This unit should have already moved due to the isImmobilized check. via the
+     * {@link #calculateMoveIndex(Entity, StringBuilder)} method.  The highest index value is moved first.
+     *
+     * @return The entity that should be moved next.
+     */
+    Entity getEntityToMove() {
+        final Game currentGame = getGame();
+
+        if ((currentGame != null) && (currentGame.getPhase() == GamePhase.MOVEMENT)) {
+            final GameTurn turn = currentGame.getTurnForPlayer(getLocalPlayerNumber());
+            if (turn != null) {
+                final int deployEntityNum = currentGame.getFirstDeployableEntityNum(turn);
+                if (deployEntityNum != Entity.NONE) {
+                    final Entity deployEntity = currentGame.getEntity(deployEntityNum);
+                    // A unit that cannot walk on (a tractor towing trailers) deploys in the deployment phase; the
+                    // server rejects it here, which wasted the movement turn
+                    if ((deployEntity != null) && !deployEntity.isDone() && !deployEntity.isOffBoard()
+                          && !deployEntity.isTransported() && !isRefusedThisPhase(deployEntity)
+                          && canWalkOnThisRound(deployEntity)) {
+                        LOGGER.info("Choosing {} to deploy during the movement phase.", deployEntity.getDisplayName());
+                        return deployEntity;
+                    }
+                }
+            }
+
+            for (final Entity entity : getEntitiesOwned()) {
+                // A carried unit enters with its transport; the server refuses a move for it
+                if (entity.isDone() || entity.isOffBoard() || entity.isTransported() || isRefusedThisPhase(entity)) {
+                    continue;
+                }
+                if (((entity.getPosition() == null) || !entity.isDeployed()) && canWalkOnThisRound(entity)) {
+                    LOGGER.info("Choosing {} to deploy during the movement phase.", entity.getDisplayName());
+                    return entity;
+                }
+            }
+        }
+
+        // first move useless units: immobile units, ejected MekWarrior, etc
+        Entity movingEntity = null;
+        final List<Entity> myEntities = getEntitiesOwned();
+        double highestIndex = -Double.MAX_VALUE;
+        final StringBuilder msg = new StringBuilder("Deciding who to move next.");
+        for (final Entity entity : myEntities) {
+            msg.append("\n\tUnit ").append(entity.getDisplayName());
+
+            if (entity.isDone()) {
+                msg.append("has already moved this phase");
+                continue;
+            }
+
+            if (isRefusedThisPhase(entity)) {
+                msg.append("had its move refused by the server this phase.");
+                continue;
+            }
+
+            if ((currentGame != null) && !currentGame.getPhase().isSimultaneous(currentGame)
+                  && (entity.isOffBoard() ||
+                  (entity.isUnloadedThisTurn() ||
+                   !Objects.requireNonNull(currentGame.getTurn()).isValidEntity(entity, currentGame)))) {
+                msg.append("cannot be moved.");
+                continue;
+            }
+
+            // An undeployed unit that may not walk on this round (a tractor towing trailers, or one due in a later
+            // round) has no move to make; the server would still accept a path carrying a DEPLOY step
+            if (!entity.isDeployed() && !canWalkOnThisRound(entity)) {
+                msg.append("is not deploying this round.");
+                continue;
+            }
+
+            // Move immobile units & ejected MekWarriors immediately.
+            if (isImmobilized(entity) && !(entity instanceof Infantry)) {
+                msg.append("is immobile.");
+                movingEntity = entity;
+                break;
+            }
+
+            if (entity instanceof EjectedCrew) {
+                msg.append("is ejected crew.");
+                movingEntity = entity;
+                break;
+            }
+
+            // can't do anything with out-of-control aero's, so use them as init sinks
+            if (entity.isAero() && ((IAero) entity).isOutControlTotal()) {
+                msg.append("is out-of-control aero.");
+                movingEntity = entity;
+                break;
+            }
+
+            // If I only have 1 unit, no need to calculate an index.
+            if (1 == myEntities.size()) {
+                msg.append("is my only unit.");
+                movingEntity = entity;
+                break;
+            }
+
+            // We will move the entity with the highest index.
+            final double moveIndex = calculateMoveIndex(entity, msg);
+            msg.append("\n\thas index ").append(moveIndex).append(" vs ").append(highestIndex);
+            if (moveIndex >= highestIndex) {
+                highestIndex = moveIndex;
+                movingEntity = entity;
+            }
+        }
+
+        if (movingEntity == null) {
+            LOGGER.warn(msg.toString());
+        } else {
+            LOGGER.debug(msg.toString());
+        }
+
+        return movingEntity;
+    }
+
+    @Override
+    protected @Nullable MovePath calculateMoveTurn() {
+        try {
+            MovePath path = continueMovementFor(getEntityToMove());
+            // Update the friendly heat map with movement of ground units
+            if (path != null && path.getEntity().isGround()) {
+                getMemory().getFriendlyHeatMap().updateTrackers(path);
+            }
+            return path;
+        } catch (Exception ignored) {
+            LOGGER.error("Error while calculating movement");
+            return null;
+        }
+    }
+
+    /**
+     * Writes the move just chosen for a unit into the bot memory, so later turns can ask what the unit did.
+     *
+     * @param path the chosen path, or {@code null} if no move was found
+     */
+    @Override
+    protected void onMovePathChosen(@Nullable MovePath path) {
+        if (path == null) {
+            return;
+        }
+        // The cached label only: asking for a fresh one here could pin a behaviour the bot has not reached yet.
+        BehaviorType behavior = getUnitBehaviorTracker().getCachedBehaviorType(path.getEntity());
+        getMemory().rememberMove(path, getGame().getCurrentRound(), behavior);
+    }
+
+    @Override
+    protected @Nullable PhysicalOption calculatePhysicalTurn() {
+        try {
+            initialize();
+            // get the first entity that can act this turn
+            final Entity attacker = game.getFirstEntity(getMyTurn());
+
+            // If my unit is forced to withdraw, don't attack unless I've been
+            // attacked or I have no retreat path anyway.
+            if (getForcedWithdrawalTracker().isWithdrawing(attacker)) {
+                final StringBuilder msg = new StringBuilder(attacker.getDisplayName()).append(
+                      " is withdrawing.");
+                if (getMemory().wasAttackedWhileFleeing(attacker.getId())) {
+                    msg.append("\n\tBut I was fired on, so I will hit back.");
+                } else if (hasNoRetreatPath(attacker)) {
+                    msg.append("\n\tBut I have no path to my retreat edge, so I will fight on.");
+                } else {
+                    msg.append("\n\tI will not attack so long as I'm not fired on.");
+                    LOGGER.info(msg.toString());
+                    return null;
+                }
+                LOGGER.info(msg.toString());
+            }
+
+            // the original bot's physical options seem superior
+            return PhysicalCalculator.getBestPhysical(attacker, game, getBehaviorSettings(), getHonorUtil());
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    @Override
+    protected void calculatePreEndDeclarationsTurn() {
+        try {
+            initialize();
+            Entity entity = getGame().getFirstEntity(getMyTurn());
+            List<InfantryActionDeclaration> declarations = InfantryActionPlanner.plan(getGame(), getLocalPlayer(),
+                  getBehaviorSettings(), getMemory());
+            LOGGER.debug("[PreEnd] bot declaration turn: {} infantry action declaration(s)", declarations.size());
+            for (InfantryActionDeclaration declaration : declarations) {
+                sendInfantryActionDeclaration(declaration);
+            }
+            if (entity != null) {
+                sendAttackData(entity.getId(), new Vector<>(0));
+            }
+            sendDone(true);
+        } catch (Exception exception) {
+            LOGGER.error(exception, "Error in calculatePreEndDeclarationsTurn");
+            Entity entity = getGame().getFirstEntity(getMyTurn());
+            if (entity != null) {
+                sendAttackData(entity.getId(), new Vector<>(0));
+            }
+            sendDone(true);
+        }
+    }
+
+    boolean wantsToFallBack(final Entity entity) {
+        return getForcedWithdrawalTracker().isWithdrawing(entity) || getFallBack();
+    }
+
+    /**
+     * Returns {@code true} when the given unit is withdrawing but has no path to its retreat edge. A trapped
+     * unit cannot trade distance for safety, so it is allowed to fight instead of holding its fire.
+     *
+     * @param entity the withdrawing unit to check
+     *
+     * @return {@code true} when no route to the retreat edge exists for this unit
+     */
+    boolean hasNoRetreatPath(final Entity entity) {
+        return getUnitBehaviorTracker().getBehaviorType(entity, this) == BehaviorType.NoPathToDestination;
+    }
+
+    MoraleUtil getMoraleUtil() {
+        return moraleUtil;
+    }
+
+    /**
+     * Logic to determine if this entity is "falling back" for any reason
+     *
+     * @param entity The entity to check.
+     *
+     * @return Whether or not the entity is falling back.
+     */
+    boolean isFallingBack(final Entity entity) {
+        return getBehaviorSettings().shouldAutoFlee() || getForcedWithdrawalTracker().isWithdrawing(entity);
+    }
+
+    /**
+     * Logic to determine if this entity is in a state where it can shoot due to being attacked while fleeing.
+     *
+     * @param entity Entity to check.
+     *
+     * @return Whether or not this entity can shoot while falling back.
+     */
+    boolean canShootWhileFallingBack(Entity entity) {
+        return getMemory().wasAttackedWhileFleeing(entity.getId());
+    }
+
+    boolean mustFleeBoard(final Entity entity) {
+        // a player's edge order decides: exit by the edge once on it, or hold at the edge and never leave
+        if (getUnitOrdersFollower().isOrderedToHoldAtEdge(entity)) {
+            return false;
+        } else if (getUnitOrdersFollower().isOrderedToExit(entity)) {
+            return entity.canFlee(entity.getPosition())
+                  && (0 >= getPathRanker(entity).distanceToHomeEdge(entity.getPosition(), entity.getBoardId(),
+                  getHomeEdge(entity), getGame()));
+        }
+        if (!isFallingBack(entity)) {
+            return false;
+        } else if (!entity.canFlee(entity.getPosition()) || entity.getPosition() == null) {
+            return false;
+        } else if (0 < getPathRanker(entity).distanceToHomeEdge(entity.getPosition(), entity.getBoardId(),
+              getHomeEdge(entity), getGame())) {
+            return false;
+        } else {
+            return getFleeBoard() || getForcedWithdrawalTracker().isWithdrawing(entity);
+        }
+    }
+
+    /**
+     * Whether a unit that cannot move right now is expected to move again under its own power.
+     * <p>
+     * Movement lost to damage is gone for the rest of the battle, but movement lost to heat comes back as
+     * soon as the unit cools: heat costs a unit one MP for every five heat points, so a Mek walking 5 has
+     * nothing left at 25 heat and walks again the moment it drops back to 24. A unit in that state is
+     * stalled, not finished, and abandoning it throws away a working machine.
+     * </p><p>
+     * A stalled unit has two ways out and only needs one of them. It can stand still and let its heat
+     * sinks win, which they do whenever they out-dissipate the heat that arrives every turn no matter what
+     * the pilot chooses to do. Or, if it still has working jump jets, it can jump clear - which leaves any
+     * fire behind but costs jump heat instead. Both comparisons are strictly greater: a unit whose sinks
+     * exactly match its incoming heat holds that heat forever and never moves again.
+     * </p>
+     *
+     * @param mover the unit {@link #isImmobilized(Entity)} has reported as unable to move
+     *
+     * @return {@code true} if the unit is expected to move again without help
+     */
+    boolean canRecoverMobility(final Entity mover) {
+        // Only heat is temporary. A unit that still has movement points was called immobilized for some
+        // other reason - prone with poor odds of standing, or bogged down - and no amount of cooling
+        // changes that, so it is not this method's business.
+        if (0 < mover.getRunMP()) {
+            return false;
+        }
+
+        // The core rules already measure this with heat ignored, so anything it catches is damage rather
+        // than temperature: legs gone, gyro destroyed, or prone with no walking MP left to stand on.
+        if (mover.isPermanentlyImmobilized(true)) {
+            return false;
+        }
+
+        // A unit that does not track heat did not lose its movement to heat, so there is nothing to wait out.
+        if (Entity.DOES_NOT_TRACK_HEAT == mover.getHeatCapacity()) {
+            return false;
+        }
+
+        final int dissipation = mover.getHeatCapacityWithWater();
+        return canJumpClear(mover, dissipation) || (dissipation > recurringHeat(mover, false));
+    }
+
+    /**
+     * Whether a heat-stalled unit can leave its hex by jumping rather than waiting to cool.
+     * <p>
+     * Heat never reduces jump MP, so a unit with working jets can move under its own power even at zero
+     * walking MP - as long as it can afford the jump's heat on top of everything else it is already
+     * gaining. Jumping also leaves any fire behind, which is why the recurring heat here excludes it. A
+     * prone Mek does not get this route: it has to stand up first, and standing needs walking MP it does
+     * not have.
+     * </p>
+     *
+     * @param mover       the unit being assessed
+     * @param dissipation the unit's heat dissipation per turn
+     *
+     * @return {@code true} if jumping one hex is sustainable for this unit
+     */
+    private boolean canJumpClear(final Entity mover, final int dissipation) {
+        return !mover.isProne()
+              && (0 < mover.getAnyTypeMaxJumpMP())
+              && (dissipation > recurringHeat(mover, true) + mover.getJumpHeat(CHEAPEST_JUMP_DISTANCE));
+    }
+
+    /**
+     * Heat this unit gains every turn whatever its pilot decides to do. Weapon heat and movement heat are
+     * choices and are therefore left out, and so is every switchable heat load:
+     * {@link BotHeatEquipmentManager} sheds stealth armor, Null Signature, Void Signature, the Chameleon
+     * shield and Nova CEWS in the end phase once a unit reaches shutdown-roll heat, so a unit stalled
+     * badly enough to reach this question has already dropped them.
+     * <p>
+     * What is left is heat the pilot genuinely cannot switch off: engine criticals, and a burning hex the
+     * unit has no movement left to walk out of.
+     * </p><p>
+     * Radical heat sinks are deliberately not credited on the dissipation side even though
+     * {@link BotHeatEquipmentManager} now activates them. They last three consecutive turns before the
+     * odds turn against the unit, and a failed roll destroys the system outright, so they are a
+     * short-term reprieve rather than a reason to believe a unit will keep cooling.
+     * </p>
+     *
+     * @param mover          the unit being assessed
+     * @param leavingThisHex {@code true} when the unit is about to jump out of its current hex, which
+     *                       means any fire it is standing in stops being its problem
+     *
+     * @return heat points added per turn that the pilot cannot avoid
+     */
+    int recurringHeat(final Entity mover, final boolean leavingThisHex) {
+        int recurring = mover.getEngineCritHeat();
+
+        if (!leavingThisHex && isStandingInFire(mover)) {
+            int fireHeat = FIRE_HEAT_PER_TURN;
+            if ((mover instanceof Mek mek) && mek.hasIntactHeatDissipatingArmor()) {
+                fireHeat /= 2;
+            }
+            recurring += fireHeat;
+        }
+
+        return recurring;
+    }
+
+    /**
+     * Whether this unit is taking heat from a fire in its own hex. Mirrors the fire check in the server's
+     * heat resolver, including the requirement that the fire started on an earlier turn.
+     *
+     * @param mover the unit being assessed
+     *
+     * @return {@code true} if the unit's hex is burning and the unit is low enough to be burned by it
+     */
+    private boolean isStandingInFire(final Entity mover) {
+        if (!mover.tracksHeat() || (0 != mover.getAltitude()) || (1 < mover.getElevation())) {
+            return false;
+        }
+
+        final Hex hex = getGame().getHex(mover.getPosition(), mover.getBoardId());
+        return (hex != null) && hex.containsTerrain(Terrains.FIRE) && (0 < hex.getFireTurn());
+    }
+
+    boolean isImmobilized(final Entity mover) {
+        if (mover.isImmobile() && !mover.isShutDown()) {
+            LOGGER.info("Is truly immobile.");
+            return true;
+        } else if (1 > mover.getRunMP()) {
+            LOGGER.info("Has 0 movement.");
+            return true;
+        } else if (!(mover instanceof Mek)) {
+            return false;
+        }
+
+        final Mek mek = (Mek) mover;
+        if (!mek.isProne() && !mek.isStuck() && !mek.isStalled()) {
+            return false;
+        }
+
+        final MovePath movePath = new MovePath(getGame(), mover);
+
+        // For a normal fall-shame setting (index 5), our threshold should be
+        // a 10+ piloting roll.
+        final int threshold = switch (getBehaviorSettings().getFallShameIndex()) {
+            case 10 -> 7;
+            case 9 -> 8;
+            case 8, 7 -> 9;
+            case 6, 5 -> 10;
+            case 4 -> 11;
+            case 3 -> 12;
+            default -> 13; // Actually impossible.
+        };
+
+        // If we're prone, see if we have a chance of getting up.
+        if (mek.isProne()) {
+            if (mek.cannotStandUpFromHullDown()) {
+                LOGGER.info("Cannot stand up.");
+                return true;
+            }
+
+            final MoveStepType type = getBooleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_TAC_OPS_CAREFUL_STAND) ?
+                  MoveStepType.CAREFUL_STAND :
+                  MoveStepType.GET_UP;
+            final MoveStep getUp = new MoveStep(movePath, type);
+
+            // If our odds to get up are equal to or worse than the threshold,
+            // consider ourselves immobile.
+            final PilotingRollData target = mek.checkGetUp(getUp, movePath.getLastStepMovementType());
+            LOGGER.info("Need to roll {} to stand and our tolerance is {}", target.getValue(), threshold);
+            return (target.getValue() >= threshold);
+        }
+
+        // How likely are we to get unstuck.
+        final MoveStepType type = MoveStepType.FORWARDS;
+        final MoveStep walk = new MoveStep(movePath, type);
+        final Hex hex = getGame().getHexOf(mek);
+        final PilotingRollData target = mek.checkBogDown(walk,
+              movePath.getLastStepMovementType(),
+              hex,
+              mek.getPriorPosition(),
+              mek.getPosition(),
+              hex.getLevel(),
+              false);
+        LOGGER.info("Need to roll {} to get unstuck and our tolerance is {}", target.getValue(), threshold);
+        return (target.getValue() >= threshold);
+    }
+
+    boolean getBooleanOption(final String name) {
+        return getGame().getOptions().booleanOption(name);
+    }
+
+    /**
+     * This deploys trailers behind a tractor, if any are attached. It is called when a tractor is deployed for
+     * walk-on-deployment
+     *
+     * @param tractor Entity pulling
+     */
+    private void deployTrain(Entity tractor) {
+        if (tractor.getAllTowedUnits().isEmpty()) {
+            return;
+        }
+
+        int trailerCount = tractor.getAllTowedUnits().size();
+        List<Coords> trainPath = TrainLayout.deploymentPath(tractor.getPosition(),
+              tractor.getFacing(),
+              trailerCount);
+        List<Integer> trainFacings = new ArrayList<>();
+        for (int step = 0; step < trainPath.size(); step++) {
+            trainFacings.add(tractor.getFacing());
+        }
+
+        List<TrainLayout.TrainPlacement> placements = TrainLayout.computeLayout(
+              tractor.getGame(),
+              tractor,
+              tractor.getPosition(),
+              tractor.getFacing(),
+              trainPath,
+              trainFacings);
+
+        TrainLayout.applyLayout(tractor.getGame(), placements);
+
+        for (TrainLayout.TrainPlacement placement : placements) {
+            Entity trailer = tractor.getGame().getEntity(placement.entityId());
+            if (trailer == null) {
+                continue;
+            }
+            trailer.setBoardId(tractor.getBoardId());
+            trailer.setElevation(tractor.getElevation());
+            trailer.setSecondaryFacing(trailer.getFacing());
+        }
+    }
+
+    /**
+     * Turns to try when fitting a walk-on train, nearest the wanted facing first: straight on, one step either way,
+     * two steps either way, then about face.
+     */
+    private static final int[] TRAIN_FACING_TURNS = { 0, 1, -1, 2, -2, 3 };
+
+    /**
+     * Finds a facing that lets the whole train fit its tractor's walk-on zone, trying the wanted facing first and then
+     * turning away from it one step at a time. Each train hex is checked against the tractor's zone, as the server
+     * does; a trailer's own zone does not matter.
+     *
+     * @param tractor       the tractor at the head of the train
+     * @param tractorHex    the hex the tractor would walk on to
+     * @param boardId       the board being deployed to
+     * @param wantedFacing  the facing Princess would like the tractor to have
+     *
+     * @return the nearest facing that fits, or {@code null} if none does
+     */
+    private @Nullable Integer findLegalTrainFacing(Entity tractor, Coords tractorHex, int boardId, int wantedFacing) {
+        for (int turn : TRAIN_FACING_TURNS) {
+            int facing = FireControl.correctFacing(wantedFacing + turn);
+            if (TrainLayout.firstIllegalDeploymentHex(getGame(), tractor, tractorHex, boardId, facing) == null) {
+                return facing;
+            }
+        }
+        return null;
+    }
+
+    private @Nullable MovePath calculateDeploymentPathForMovementPhase(final Entity entity) {
+        // Only isDeployed() decides this. The position below is set on the bot's local copy before the path is
+        // sent, so after a rejected attempt the unit is still undeployed but already has a position.
+        if ((entity == null) || entity.isDeployed()) {
+            return null;
+        }
+
+        final Coords deployCoords = getDeploymentCoords(entity, Entity.NONE, false, "movement-phase deployment");
+        if (deployCoords == null) {
+            LOGGER.warn("{}: {} has no deployment coordinates, so will not deploy", getName(), entity.getDisplayName());
+            return null;
+        }
+
+        final Board board = game.getBoard(entity);
+        final Hex deployHex = board.getHex(deployCoords);
+        final int decentFacing = getDeploymentFacing(entity, board, deployCoords);
+        final Integer deployElevation = getDeploymentElevation(entity, board, deployCoords, deployHex, false, Entity.NONE);
+        if (deployElevation == null) {
+            return null;
+        }
+
+        entity.setPosition(deployCoords);
+        entity.setBoardId(board.getBoardId());
+        entity.setFacing(decentFacing);
+        entity.setSecondaryFacing(decentFacing);
+        if (entity.isAero()) {
+            entity.setAltitude(deployElevation);
+        } else {
+            entity.setElevation(deployElevation);
+        }
+        // Deploy the train if there is one, before we calculate movement. The whole train has to fit the tractor's
+        // walk-on zone, so turn it until it does, starting from the facing Princess wants.
+        if (!entity.getAllTowedUnits().isEmpty()) {
+            final Integer trainFacing = findLegalTrainFacing(entity, deployCoords, board.getBoardId(), decentFacing);
+            if (trainFacing == null) {
+                LOGGER.warn("[WalkOnDeploy] {}: {} cannot fit its train at {} in any facing, so will not deploy",
+                      getName(),
+                      entity.getDisplayName(),
+                      deployCoords);
+                return null;
+            }
+            LOGGER.info("[WalkOnDeploy] {}: {} walks on a {}-hex train at {} facing {} (wanted {})",
+                  getName(),
+                  entity.getDisplayName(),
+                  TrainLayout.trainLengthInHexes(getGame(), entity),
+                  deployCoords,
+                  trainFacing,
+                  decentFacing);
+            entity.setFacing(trainFacing);
+            entity.setSecondaryFacing(trainFacing);
+            deployTrain(entity);
+        }
+
+        // A movement-phase deployment can be re-evaluated after the bot has already chosen a valid deployment
+        // hex/position, and the cached path set can still reflect a non-deploy movement enumeration. Force a fresh
+        // deployment-aware recalculation for this unit before ranking so the DEPLOY step is not silently dropped.
+        getPrecognition().ensureUpToDate();
+        getPrecognition().getPathEnumerator().getUnitPaths().remove(entity.getId());
+        getPrecognition().getPathEnumerator().getLongRangePaths().remove(entity.getId());
+        getPrecognition().getPathEnumerator().recalculateMovesFor(entity, true);
+        // Every path built above starts with a DEPLOY step; the filter is a safety net, because a path without one
+        // reaches the server as a skipped turn
+        final List<MovePath> paths = keepDeploymentPaths(getMovePathsAndSetNecessaryTargets(entity, false));
+        if (paths.isEmpty()) {
+            LOGGER.warn("[WalkOnDeploy] {}: {} has no deploying paths for behavior {}, so will deploy only",
+                  getName(),
+                  entity.getDisplayName(),
+                  getUnitBehaviorTracker().getBehaviorType(entity, this));
+            final MovePath deployOnly = new MovePath(game, entity);
+            deployOnly.addStep(MoveStepType.DEPLOY);
+            return deployOnly;
+        }
+
+        final IPathRanker pathRanker = getPathRanker(entity);
+        pathRanker.initUnitTurn(entity, getGame());
+        final double fallTolerance = getBehaviorSettings().getFallShameIndex() / 20d + 0.50d;
+        // The ranker can swap in a fresh path set (move-to-contact re-rank), so filter its output as well
+        final TreeSet<RankedPath> rankedPaths = keepDeployingRankedPaths(pathRanker.rankPaths(paths,
+              getGame(),
+              getMaxWeaponRange(entity),
+              fallTolerance,
+              getEnemyEntities(),
+              getBehaviorSettings().isExclusiveMutualSupport() ? getEntitiesOwned() : getFriendEntities()));
+        if (rankedPaths.isEmpty()) {
+            LOGGER.warn("[WalkOnDeploy] {}: {} has no ranked deploying paths, so will deploy only",
+                  getName(),
+                  entity.getDisplayName());
+            final MovePath deployOnly = new MovePath(game, entity);
+            deployOnly.addStep(MoveStepType.DEPLOY);
+            return deployOnly;
+        }
+        final RankedPath bestPath = pathRanker.getBestPath(rankedPaths);
+        if (bestPath == null) {
+            LOGGER.info("{}: {} has no best path, so will deploy only", getName(), entity.getDisplayName());
+            final MovePath deployOnly = new MovePath(game, entity);
+            deployOnly.addStep(MoveStepType.DEPLOY);
+            return deployOnly;
+        }
+        LOGGER.info("{}: {} chose to {} with a hexes moved of {} and MP used of {}. Deployment Step: {}",
+                    getName(),
+                    entity.getDisplayName(),
+                    bestPath.getPath().getLastStepMovementType(),
+                    bestPath.getPath().getHexesMoved(),
+                    bestPath.getPath().getMpUsed(),
+                    bestPath.getPath().contains(MoveStepType.DEPLOY));
+        return bestPath.getPath();
+    }
+
+    /**
+     * Keeps only the paths that deploy the unit. An undeployed unit's path must contain a {@code DEPLOY} step, or the
+     * server treats it as a skipped turn and the unit stays off the board.
+     *
+     * @param paths candidate paths; may be {@code null}
+     *
+     * @return the paths that contain a {@code DEPLOY} step; empty, never {@code null}
+     */
+    static List<MovePath> keepDeploymentPaths(@Nullable List<MovePath> paths) {
+        final List<MovePath> deploymentPaths = new ArrayList<>();
+        if (paths == null) {
+            return deploymentPaths;
+        }
+        for (MovePath path : paths) {
+            if (path.contains(MoveStepType.DEPLOY)) {
+                deploymentPaths.add(path);
+            }
+        }
+        return deploymentPaths;
+    }
+
+    /**
+     * Keeps only the ranked paths that deploy the unit. The result uses the same ordering as the input, so the best
+     * path stays first.
+     *
+     * @param rankedPaths ranked candidate paths
+     *
+     * @return the ranked paths that contain a {@code DEPLOY} step
+     */
+    static TreeSet<RankedPath> keepDeployingRankedPaths(TreeSet<RankedPath> rankedPaths) {
+        final TreeSet<RankedPath> deployingPaths = new TreeSet<>(rankedPaths.comparator());
+        for (RankedPath rankedPath : rankedPaths) {
+            if (rankedPath.getPath().contains(MoveStepType.DEPLOY)) {
+                deployingPaths.add(rankedPath);
+            }
+        }
+        return deployingPaths;
+    }
+
+    private static boolean hasJumpDeclaration(@Nullable MovePath path) {
+        return (path != null) && (path.contains(MoveStepType.START_JUMP)
+              || path.contains(MoveStepType.JUMP_MEK_MECHANICAL_BOOSTER));
+    }
+
+    private static boolean hasJumpDeclaration(List<MovePath> paths) {
+        if ((paths == null) || paths.isEmpty()) {
+            return false;
+        }
+        for (MovePath path : paths) {
+            if (hasJumpDeclaration(path)) {
+               return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isJumpDeclaration(MoveStepType type) {
+        return (type == MoveStepType.START_JUMP) || (type == MoveStepType.JUMP_MEK_MECHANICAL_BOOSTER);
+    }
+
+    @Override
+    protected MovePath continueMovementFor(final Entity entity) {
+        Objects.requireNonNull(entity, "Entity is null.");
+
+        if (!entity.isDeployed() || (entity.getPosition() == null)) {
+            final MovePath deploymentMovePath = calculateDeploymentPathForMovementPhase(entity);
+            if (deploymentMovePath != null) {
+                return deploymentMovePath;
+            }
+        }
+
+        try {
+            // a hold position order trumps all other movement; airborne units are exempt because they
+            // cannot legally stand still
+            // Shoot-and-scoot governs the bot's ON-BOARD artillery on its own - hold and fire at standoff, never
+            // advancing into the enemy, and displace when threatened - independent of any global hold order. Off-board
+            // artillery cannot move, so it is exempt (it simply keeps firing from off-board); airborne units are exempt
+            // because they cannot stand still.
+            if (shootAndScoot && isArtilleryWithAmmo(entity) && !entity.isOffBoard()
+                  && !entity.isAirborne() && !entity.isAirborneVTOLorWIGE()) {
+                return getShootAndScootPath(entity);
+            }
+
+            if (isCommittedToInfantryAction(entity)) {
+                LOGGER.info("[InfantryAction] {}: {} is committed to the action in building {} and holds its ground",
+                      getName(), entity.getDisplayName(), entity.getInfantryCombatTargetId());
+                return getHoldPositionPath(entity);
+            }
+
+            if (getHoldPosition() && !entity.isAirborne() && !entity.isAirborneVTOLorWIGE()) {
+                LOGGER.info("{}: {} is holding position", getName(), entity.getDisplayName());
+                return getHoldPositionPath(entity);
+            }
+
+            if (getUnitOrdersFollower().isHolding(entity) && !entity.isAirborne()
+                  && !entity.isAirborneVTOLorWIGE()) {
+                LOGGER.info("[BotOrders] {} (ID {}) round {}: HOLD - {}", entity.getDisplayName(), entity.getId(),
+                      game.getCurrentRound(), getUnitOrdersFollower().holdReason(entity));
+                return getHoldPositionPath(entity);
+            }
+
+            if (getUnitOrdersFollower().isOrderedToExit(entity) && mustFleeBoard(entity)) {
+                LOGGER.info("[BotOrders] {} (ID {}) round {}: EXIT_BY_EDGE - leaving by the {} edge",
+                      entity.getDisplayName(), entity.getId(), game.getCurrentRound(), getHomeEdge(entity));
+                final MovePath exitPath = new MovePath(game, entity);
+                exitPath.addStep(MoveStepType.FLEE);
+                return exitPath;
+            }
+
+            // figure out who moved last, and whose move lists need to be updated
+
+            // moves this entity during movement phase
+            LOGGER.debug("Moving {} (ID {})", entity.getDisplayName(), entity.getId());
+            getPrecognition().ensureUpToDate();
+
+            if (getUnitBehaviorTracker().isFollowingOrdersOverWithdrawal(entity, this)) {
+                // A crippled unit the player has sent somewhere goes there instead of withdrawing (issue #9038). It
+                // stays a withdrawing unit for firing and honor, but does not run for, or leave by, its retreat edge.
+                getOrdersRadio().report(entity, OrdersRadio.RadioEvent.FOLLOWING_ORDERS, describeOrderedDestination(entity));
+            } else if (isFallingBack(entity)) {
+                String msg = entity.getDisplayName();
+                if (getFallBack()) {
+                    msg = Messages.getString("Princess.fallingBack", entity.getDisplayName());
+                } else if (getForcedWithdrawalTracker().isWithdrawing(entity)) {
+                    msg = Messages.getString("Princess.withdrawing", entity.getDisplayName());
+                }
+                LOGGER.debug(msg);
+                sendChat(msg, Level.ERROR);
+
+                // If this entity is falling back, able to flee the board, on
+                // its home edge, and must flee, do so.
+                if (mustFleeBoard(entity)) {
+                    final MovePath mp = new MovePath(game, entity);
+                    mp.addStep(MoveStepType.FLEE);
+                    return mp;
+                }
+
+                // If we want to flee but cannot, eject the crew - unless the unit is only stopped by heat
+                // it can still shed, in which case it moves again in a turn or two and is worth keeping.
+                if (isImmobilized(entity) && entity.isEjectionPossible()) {
+                    if (canRecoverMobility(entity)) {
+                        // Name the route that saved it, so the printed numbers always back the claim: a
+                        // unit jumping clear of a fire is not out-sinking the heat it is standing in.
+                        final int dissipation = entity.getHeatCapacityWithWater();
+                        if (canJumpClear(entity, dissipation)) {
+                            LOGGER.info("{} cannot walk but can jump clear: sinks {} against {} recurring"
+                                        + " heat plus {} jump heat. Not abandoning it.",
+                                  entity.getDisplayName(),
+                                  dissipation,
+                                  recurringHeat(entity, true),
+                                  entity.getJumpHeat(CHEAPEST_JUMP_DISTANCE));
+                        } else {
+                            LOGGER.info("{} cannot move but will cool: sinks {} against {} recurring heat."
+                                        + " Not abandoning it.",
+                                  entity.getDisplayName(),
+                                  dissipation,
+                                  recurringHeat(entity, false));
+                        }
+                    } else {
+                        msg = entity.getDisplayName() + " is immobile. Abandoning unit.";
+                        LOGGER.info(msg);
+                        sendChat(msg, Level.ERROR);
+                        final MovePath mp = new MovePath(game, entity);
+                        mp.addStep(MoveStepType.EJECT);
+                        return mp;
+                    }
+                }
+            }
+
+            final List<MovePath> paths = getMovePathsAndSetNecessaryTargets(entity, false);
+
+            if (paths == null) {
+                LOGGER.warn("No valid paths found.");
+                return performPathPostProcessing(new MovePath(game, entity), 0);
+            }
+
+            final double thisTimeEstimate = (paths.size() * moveEvaluationTimeEstimate) / 1e3;
+            if (LOGGER.getLevel().isLessSpecificThan(Level.INFO)) {
+                final String message = getMessage(entity, thisTimeEstimate, paths);
+                sendChat(message);
+            }
+
+            final long startTime = java.lang.System.currentTimeMillis();
+            getPathRanker(entity).initUnitTurn(entity, getGame());
+            // fall tolerance range between 0.50 and 1.0
+            final double fallTolerance = getBehaviorSettings().getFallShameIndex() / 20d + 0.50d;
+
+            // each unit in a formation keeps to the formation's pace, up to its own walk or run
+            final List<MovePath> pacedPaths = getUnitOrdersFollower().limitToFormationPace(entity, paths);
+            // the unit's active waypoint is worked out once for all its moves, not for each one scored
+            getUnitBehaviorTracker().beginRanking(entity, this);
+            final TreeSet<RankedPath> rankedPaths;
+            try {
+                rankedPaths = getPathRanker(entity).rankPaths(pacedPaths,
+                      getGame(),
+                      getMaxWeaponRange(entity),
+                      fallTolerance,
+                      getEnemyEntities(),
+                      getBehaviorSettings().isExclusiveMutualSupport() ? getEntitiesOwned() : getFriendEntities());
+            } finally {
+                getUnitBehaviorTracker().endRanking();
+            }
+
+            final long stop_time = java.lang.System.currentTimeMillis();
+
+            // update path evaluation time estimate - skip empty path sets, otherwise the division by
+            // paths.size() yields +Infinity in double math and permanently poisons the running average
+            // (the reset guard below never re-fires because Infinity is never equal to 0).
+            if (!paths.isEmpty()) {
+                final double updatedEstimate = ((double) (stop_time - startTime)) / ((double) paths.size());
+                if (0 == moveEvaluationTimeEstimate) {
+                    moveEvaluationTimeEstimate = updatedEstimate;
+                }
+
+                moveEvaluationTimeEstimate = 0.5 * (updatedEstimate + moveEvaluationTimeEstimate);
+            }
+
+            if (rankedPaths.isEmpty()) {
+                return performPathPostProcessing(new MovePath(game, entity), 0);
+            }
+
+            LOGGER.debug("Path ranking took {} millis", stop_time - startTime);
+
+            final RankedPath bestPath = getPathRanker(entity).getBestPath(rankedPaths);
+            LOGGER.info("Best Path: {}  Rank: {}", bestPath.getPath(), bestPath.getRank());
+
+            return performPathPostProcessing(bestPath);
+        } catch (Exception e) {
+            LOGGER.error("MP is now null!", e);
+            return null;
+        } finally {
+            precognition.unPause();
+        }
+    }
+
+    static String getMessage(Entity entity, double thisTimeEstimate, List<MovePath> paths) {
+        String timeEstimate = "unknown.";
+        // Guard against non-finite estimates: casting +Infinity to int saturates to Integer.MAX_VALUE
+        // (2147483647), which would otherwise surface as a nonsense "completion" time in chat.
+        if ((0 != thisTimeEstimate) && Double.isFinite(thisTimeEstimate)) {
+            timeEstimate = (int) thisTimeEstimate + " seconds";
+        }
+        return "Moving " +
+              entity.getChassis() +
+              ". " +
+              Long.toString(paths.size()) +
+              " paths to consider.  Estimated time to completion: " +
+              timeEstimate;
+    }
+
+    @Override
+    protected void initFiring() {
+        try {
+            initialize();
+
+            // ----Debugging: print out any errors made in guessing to hit
+            // values-----
+            // Only runs at TRACE log level (see FireControl.checkAllGuesses). Sweep only our own
+            // units: Princess never fires with enemy units, so cross-checking their guesses costs
+            // real to-hit calculations for no diagnostic benefit.
+            for (final Entity entity : getEntitiesOwned()) {
+                final String errors = getFireControl(entity).checkAllGuesses(entity, game);
+                if (!StringUtility.isNullOrBlank(errors)) {
+                    LOGGER.warn(errors);
+                }
+            }
+            // -----------------------------------------------------------------------
+
+            // Pick up on any infantry/BA in buildings post-movement and shoot
+            // their buildings, similar to the turret check
+            // pre-movement(infantry can move so we only set target buildings
+            // after they do).
+            for (Board board : game.getBoards().values()) {
+                final Enumeration<IBuilding> buildings = board.getBuildings();
+                while (buildings.hasMoreElements()) {
+                    final IBuilding bldg = buildings.nextElement();
+                    final Enumeration<Coords> bldgCoords = bldg.getCoords();
+                    while (bldgCoords.hasMoreElements()) {
+                        final Coords coords = bldgCoords.nextElement();
+                        for (final Entity entity : game.getEntitiesVector(coords, board.getBoardId())) {
+                            final BuildingTarget bt = new BuildingTarget(coords, board, false);
+                            // Want to target buildings with hostile infantry / BA inside them, since
+                            // there's no other way to attack them.
+                            if (isEnemyInfantry(entity, coords) &&
+                                  entity.isInBuilding() &&
+                                  !entity.isHidden()) {
+                                fireControlState.addAdditionalTarget(bt);
+                                sendChat("Building in Hex " +
+                                      coords.toFriendlyString() +
+                                      " designated target due to infantry inside building.", Level.INFO);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Next, collect the ID's of each potential target and store them in
+            // the damageMap for allocating damage during firing.
+
+            // Reset the map generated during the movement phase- The available
+            // targets may have changed during that time(ejections, enemies
+            // fleeing, etc).
+            damageMap.clear();
+            // Now add an ID for each possible target.
+            final List<Targetable> potentialTargets = FireControl.getAllTargetableEnemyEntities(getLocalPlayer(),
+                  getGame(),
+                  getFireControlState());
+            for (final Targetable target : potentialTargets) {
+                damageMap.put(target.getId(), 0d);
+            }
+
+            getFireControlState().clearTransientData();
+        } catch (Exception ignored) {
+
+        }
+    }
+
+    /**
+     * Function with side effects. Retrieves the move path collection we want the entity to consider. Sometimes it's the
+     * standard "circle", sometimes it's pruned long-range movement paths
+     */
+    public List<MovePath> getMovePathsAndSetNecessaryTargets(Entity mover, boolean forceMoveToContact) {
+        final Lock entityLock = getPrecognition().getPathEnumerator().getPathLock(mover);
+        entityLock.lock();
+        try {
+            // if the mover can't move, then there's nothing for us to do here, let's cut out.
+            if (mover.isImmobile()) {
+                return Collections.emptyList();
+            }
+
+            // No recalculation here: a walk-on unit's paths were just rebuilt with the DEPLOY step by
+            // calculateDeploymentPathForMovementPhase, and rebuilding them again doubled its planning time.
+            BehaviorType behavior = forceMoveToContact ?
+                  BehaviorType.MoveToContact :
+                  getUnitBehaviorTracker().getBehaviorType(mover, this);
+            // during the movement phase, it is technically necessary to clear this data between each unit
+            // as the state of the board may have changed due to crashes etc.
+            // generating movable clusters is a relatively cheap operation, so it's not a big deal
+            getClusterTracker().clearMovableAreas();
+            getClusterTracker().updateMovableAreas(mover);
+
+            List<MovePath> result;
+            // basic idea:
+            // if we're "in battle", just use the standard set of move paths
+            // if we're trying to get somewhere
+            //  - sort all long range paths by "mp cost" (actual MP + how long it'll take to do terrain leveling)
+            //  - set the first terrain/building as 'strategic target' if the shortest path requires terrain leveling
+            //  - if the first strategic target is in LOS at the pruned end of the shortest path,
+            //      then we actually return the paths for "engaged" behavior
+            //  - if we're unable to get where we're going, use standard set of move paths
+            switch (behavior) {
+                case Engaged:
+                    result = getPrecognition().getPathEnumerator().getUnitPaths().get(mover.getId());
+                    break;
+                case MoveToDestination:
+                case MoveToContact:
+                case ForcedWithdrawal:
+                default: {
+                    List<BulldozerMovePath> bulldozerPaths = getPrecognition().getPathEnumerator()
+                          .getLongRangePathsFor(mover);
+
+                    // for whatever reason (most likely it's wheeled), there are no long-range paths for this unit,
+                    // so just have it mill around in place as usual. Also set the behavior to "no path to destination"
+                    // so it doesn't hump the walls due to "self preservation mods"
+                    if ((bulldozerPaths == null) || bulldozerPaths.isEmpty()) {
+                        // A unit with a player's route or edge order keeps heading there: its moves are still scored
+                        // by the distance to the waypoint by the real route, which does not need a long-range path.
+                        // Labelling it "no path" would take away that pull and leave it standing still.
+                        boolean hasOrderedDestination = getUnitBehaviorTracker().getActiveWaypoint(mover, this)
+                              .isPresent() || getUnitOrdersFollower().getOrderedEdge(mover).isPresent();
+                        if (hasOrderedDestination) {
+                            LOGGER.info("[BotOrders] {} (ID {}): no long-range path; steering by the route distance",
+                                  mover.getDisplayName(), mover.getId());
+                        } else if (!mover.isAirborne()) {
+                            getUnitBehaviorTracker().overrideBehaviorType(mover, BehaviorType.NoPathToDestination);
+                        }
+                        result = getPrecognition().getPathEnumerator().getUnitPaths().get(mover.getId());
+                        break;
+                    }
+
+                    bulldozerPaths.sort(new MPCostComparator());
+
+                    if (bulldozerPaths.getFirst().needsLeveling() && getUnitOrdersFollower().hasWalkingRoute(mover)) {
+                        // clearing a way is the last resort, for when no way on foot exists (HammerGS, 2026-10-01): a
+                        // unit on a player's route that can walk round goes round. Clearing one stopped a Stalker to
+                        // shoot the town's south block and took away its route's pull, and it fell out of its lance
+                        LOGGER.info("[BotOrders] {} (ID {}) round {}: NO_LEVELING - the quickest way runs through {}, "
+                                    + "but a way on foot exists; walking round", mover.getDisplayName(), mover.getId(),
+                              game.getCurrentRound(),
+                              bulldozerPaths.getFirst().getCoordsToLevel().getFirst().getBoardNum());
+                        result = getPrecognition().getPathEnumerator().getUnitPaths().get(mover.getId());
+                        break;
+                    }
+
+                    // if the quickest route needs some terrain adjustments, let's get working on that
+                    Targetable levelingTarget = null;
+
+                    if (bulldozerPaths.getFirst().needsLeveling()) {
+                        levelingTarget = getAppropriateTarget(bulldozerPaths.getFirst().getCoordsToLevel().getFirst(),
+                              mover.getBoardId());
+                        getFireControlState().addAdditionalTarget(levelingTarget);
+                        sendChat("Hex " +
+                              levelingTarget.getPosition().toFriendlyString() +
+                              " impedes route to destination, targeting for clearing.", Level.INFO);
+                    }
+
+                    // if any of the long range paths, pruned, are within LOS of leveling coordinates, then we're actually
+                    // just going to go back to the standard unit paths
+                    List<MovePath> prunedPaths = new ArrayList<>();
+                    for (BulldozerMovePath movePath : bulldozerPaths) {
+                        BulldozerMovePath prunedPath = movePath.clone();
+                        prunedPath.clipToPossible();
+
+                        if (levelingTarget != null) {
+                            LosEffects los = LosEffects.calculateLOS(game,
+                                  mover,
+                                  levelingTarget,
+                                  prunedPath.getFinalCoords(),
+                                  levelingTarget.getPosition(),
+                                  mover.getBoardId(),
+                                  false);
+
+                            // break out of this loop, we can get to the thing we're trying to level this turn, so let's
+                            // use normal movement routines to move into optimal position to blow it up
+                            // Also set the behavior to "engaged"
+                            // so it doesn't hump walls due to "self-preservation mods"
+                            if (los.canSee()) {
+                                // if we've explicitly forced 'move to contact' behavior, don't flip back to 'engaged'
+                                if (!forceMoveToContact) {
+                                    getUnitBehaviorTracker().overrideBehaviorType(mover, BehaviorType.Engaged);
+                                }
+
+                                result = getPrecognition().getPathEnumerator().getUnitPaths().get(mover.getId());
+                                break;
+                            }
+                        }
+
+                        // add the pruned path to the list of paths we'll be returning
+                        prunedPaths.add(prunedPath);
+
+                        // also return some paths that go a little slower than max speed
+                        // in case the faster path would force an unwanted PSR or MASC check
+                        prunedPaths.addAll(PathDecorator.decoratePath(prunedPath));
+                        // Return some of the already-computed unit paths as well.
+                        prunedPaths.addAll(getPrecognition().getPathEnumerator()
+                              .getSimilarUnitPaths(mover.getId(), prunedPath));
+                    }
+                    result = prunedPaths;
+                    break;
+                }
+            }
+            return result;
+        } finally {
+            entityLock.unlock();
+        }
+    }
+
+    private void checkForDishonoredEnemies() {
+        final StringBuilder msg = new StringBuilder("Checking for dishonored enemies.");
+
+        try {
+            // With the Forced Withdrawal rule off it is a fight to the death, so fighting on while crippled or as a
+            // civilian is no dishonor. A unit a gamemaster ordered to withdraw is still protected, though.
+            final boolean judgesAttackers = getForcedWithdrawal();
+            if (!judgesAttackers) {
+                msg.append("\n\tForced withdrawal turned off; only ordered withdrawals are protected.");
+            }
+
+            for (final Entity mine : getEntitiesOwned()) {
+                // Who just attacked me?
+                final Collection<Integer> attackedBy = mine.getAttackedByThisTurn();
+                if (attackedBy.isEmpty()) {
+                    continue;
+                }
+
+                // Was my unit withdrawing under forced withdrawal when this turn began?
+                final boolean fleeing = getMemory().isCrippled(mine.getId());
+
+                for (final int id : attackedBy) {
+                    final Entity entity = getGame().getEntity(id);
+                    if (entity == null) {
+                        continue;
+                    }
+
+                    boolean isAttackerBroken = getHonorUtil().isEnemyBroken(entity.getId(), entity.getOwnerId(),
+                          getForcedWithdrawal());
+                    boolean isAttackerCivilian = !entity.isMilitary();
+                    boolean hasAttackerFault = isAttackerBroken || isAttackerCivilian;
+                    if (judgesAttackers && hasAttackerFault) {
+                        // If he'd just continued running, I would have let him
+                        // go, but the bastard shot at me!
+                        msg.append("\n\t")
+                              .append(entity.getDisplayName())
+                              .append("dishonored himself by attacking me even though he is ");
+                        if (!entity.isMilitary()) {
+                            msg.append("a civilian.");
+                        } else {
+                            msg.append("fleeing.");
+                        }
+                        getHonorUtil().setEnemyDishonored(entity.getOwnerId());
+                        continue;
+                    }
+
+                    // He shot me while I was running away!
+                    if (fleeing) {
+                        msg.append("\n\t")
+                              .append(entity.getDisplayName())
+                              .append("dishonored himself by attacking a fleeing unit (")
+                              .append(mine.getDisplayName())
+                              .append(").");
+                        getHonorUtil().setEnemyDishonored(entity.getOwnerId());
+                        getMemory().rememberAttackedWhileFleeing(mine.getId());
+                    }
+                }
+            }
+        } finally {
+            LOGGER.info(msg.toString());
+        }
+    }
+
+    private void checkForBrokenEnemies() {
+        // If the Forced Withdrawal rule is not turned on, then it's a fight
+        // to the death anyway.
+        if (!getForcedWithdrawal()) {
+            return;
+        }
+
+        for (final Entity entity : getEnemyEntities()) {
+            getHonorUtil().checkEnemyBroken(entity, getForcedWithdrawal());
+        }
+    }
+
+    /**
+     * Update the various state trackers for a specific entity. Useful to call when receiving an entity update packet
+     */
+    public void updateEntityState(final @Nullable Entity entity) {
+        if ((entity != null) && entity.getOwner().isEnemyOf(getLocalPlayer())) {
+            // currently just the honor util, and only update it for hostile units
+            getHonorUtil().checkEnemyBroken(entity, getForcedWithdrawal());
+        }
+    }
+
+    @Override
+    protected void initMovement() {
+        try {
+            initialize();
+            checkMorale();
+            getUnitBehaviorTracker().clear();
+            // routes are planned before the first unit moves, not only after the phase
+            getUnitOrdersFollower().planRoutes();
+            getSwarmContext().assignClusters(getEntitiesOwned());
+            getEnemyTracker().updateThreatAssessment(getSwarmContext().getCurrentCenter());
+            // reset strategic targets
+            fireControlState.setAdditionalTargets(new ArrayList<>());
+            for (final Coords strategicTarget : getStrategicBuildingTargets()) {
+                if (game.getBoard().getBuildingAt(strategicTarget) == null) {
+                    fireControlState.addAdditionalTarget(getAppropriateTarget(strategicTarget));
+                    sendChat("No building to target in Hex " +
+                          strategicTarget.toFriendlyString() +
+                          ", targeting for clearing.", Level.INFO);
+                } else {
+                    fireControlState.addAdditionalTarget(getAppropriateTarget(strategicTarget));
+                    sendChat("Building in Hex " + strategicTarget.toFriendlyString() + " designated strategic target.",
+                          Level.INFO);
+                }
+            }
+
+            // Pick up on any turrets and shoot their buildings as well.
+            for (Board board : game.getBoards().values()) {
+                final Enumeration<IBuilding> buildings = board.getBuildings();
+                while (buildings.hasMoreElements()) {
+                    final IBuilding bldg = buildings.nextElement();
+                    final Enumeration<Coords> bldgCoords = bldg.getCoords();
+                    while (bldgCoords.hasMoreElements()) {
+                        final Coords coords = bldgCoords.nextElement();
+                        for (final Entity entity : game.getEntitiesVector(coords, board.getBoardId(), true)) {
+                            final Targetable bt = getAppropriateTarget(coords, board.getBoardId());
+
+                            if (isEnemyGunEmplacement(entity, coords)) {
+                                fireControlState.addAdditionalTarget(bt);
+                                sendChat("Building in Hex " +
+                                      coords.toFriendlyString() +
+                                      " designated target due to Gun Emplacement.", Level.INFO);
+                            }
+
+                            if (isEnemyBuildingEntity(entity, coords)) {
+                                fireControlState.addAdditionalTarget(bt);
+                                sendChat("Building in Hex " +
+                                      coords.toFriendlyString() +
+                                      " designated target due to Building Entity.", Level.INFO);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Next, collect the ID's of each potential target and store them in
+            // the damageMap for allocating damage during movement.
+            // Right now, this doesn't get filled because I can't find where
+            // FiringPlans for potential move paths are calculated(pretty sure
+            // they are, though). This needs to be fixed at some point.
+
+            // Reset last round's damageMap
+            damageMap.clear();
+
+            // Now add an ID for each possible target.
+            final List<Targetable> potentialTargets = FireControl.getAllTargetableEnemyEntities(getLocalPlayer(),
+                  getGame(),
+                  fireControlState);
+            for (final Targetable target : potentialTargets) {
+                damageMap.put(target.getId(), 0d);
+            }
+        } catch (Exception ignored) {
+
+        }
+    }
+
+    @Override
+    public void initialize() {
+        try {
+            if (initialized) {
+                return; // no need to initialize twice
+            }
+
+            checkForDishonoredEnemies();
+            checkForBrokenEnemies();
+            refreshCrippledUnits();
+            // Report after the withdrawing list is fresh, so clients tag and warn about the units this bot will treat
+            // as fleeing this turn. Covers pirates and the forced-withdrawal-off case too.
+            sendDishonoredData();
+            initializePathRankers();
+            fireControlState = new FireControlState();
+            pathRankerState = new PathRankerState();
+            getMemory().resetUnitBehaviorTracker();
+            boardClusterTracker = new BoardClusterTracker();
+
+            // Set up heat mapping
+            initFriendlyHeatMap();
+            initEnemyHeatMaps();
+            initExperimentalFeatures();
+
+            // Pick up any turrets and add their buildings to the strategic targets list.
+            for (Board board : game.getBoards().values()) {
+                final Enumeration<IBuilding> buildings = board.getBuildings();
+                while (buildings.hasMoreElements()) {
+                    final IBuilding bldg = buildings.nextElement();
+                    final Enumeration<Coords> bldgCoords = bldg.getCoords();
+                    while (bldgCoords.hasMoreElements()) {
+                        final Coords coords = bldgCoords.nextElement();
+                        for (final Entity entity : game.getEntitiesVector(coords, board.getBoardId(), true)) {
+                            if (isEnemyGunEmplacement(entity, coords)) {
+                                getStrategicBuildingTargets().add(coords);
+
+                                sendChat("Building in Hex " +
+                                      coords.toFriendlyString() +
+                                      " designated target due to Gun Emplacement.", Level.INFO);
+                            }
+
+
+                            if (isEnemyBuildingEntity(entity, coords)) {
+                                getStrategicBuildingTargets().add(coords);
+                                sendChat("Building in Hex " +
+                                      coords.toFriendlyString() +
+                                      " designated target due to Building Entity.", Level.INFO);
+                            }
+                        }
+                    }
+                }
+            }
+
+            initialized = true;
+            BotGeometry.debugSelfTest(this);
+        } catch (Exception ignored) {
+
+        }
+    }
+
+    /**
+     * Initialize the experimental features.
+     */
+    private void initExperimentalFeatures() {
+        getMemory().setEnemyTracker(new EnemyTracker(this));
+        coverageValidator = new CoverageValidator(this);
+        SwarmContext swarmContext = new SwarmContext();
+        getMemory().setSwarmContext(swarmContext);
+        swarmCenterManager = new SwarmCenterManager(this);
+        int quadrantSize = Math.min(getGame().getBoard().getWidth(), Math.min(getGame().getBoard().getHeight(), 11));
+        swarmContext.initializeStrategicGoals(getGame().getBoard(), quadrantSize, quadrantSize);
+    }
+
+    /**
+     * Initialize the fire controls.
+     */
+    public void initializeFireControls() {
+        fireControls = new HashMap<>();
+
+        FireControl fireControl = new FireControl(this);
+        fireControls.put(FireControlType.Basic, fireControl);
+        // The same object, not a second one: Princess resolves atmospheric aerospace gunnery to exactly the
+        // instance it always did. CASPAR replaces this slot alone.
+        fireControls.put(FireControlType.Aerospace, fireControl);
+
+        InfantryFireControl infantryFireControl = new InfantryFireControl(this);
+        fireControls.put(FireControlType.Infantry, infantryFireControl);
+
+        MultiTargetFireControl multiTargetFireControl = new MultiTargetFireControl(this);
+        fireControls.put(FireControlType.MultiTarget, multiTargetFireControl);
+    }
+
+    /**
+     * Wiring seam for subclasses (CASPAR): replaces the registered fire control of the given type. Call after
+     * {@code super.initializeFireControls()}. Mirrors {@link #registerPathRanker}.
+     *
+     * @param fireControlType the fire control slot to replace
+     * @param fireControl     the replacement fire control
+     */
+    protected void registerFireControl(FireControlType fireControlType, FireControl fireControl) {
+        fireControls.put(fireControlType, fireControl);
+    }
+
+    /**
+     * Initialize the possible path rankers. Has a dependency on the fire controls being initialized.
+     */
+    public void initializePathRankers() {
+        initializeFireControls();
+
+        pathRankers = new HashMap<>();
+
+        BasicPathRanker basicPathRanker = new BasicPathRanker(this);
+        basicPathRanker.setPathEnumerator(precognition.getPathEnumerator());
+        pathRankers.put(PathRankerType.Basic, basicPathRanker);
+        // The same object, not a second one: Princess resolves atmospheric aerospace movement to exactly the
+        // ranker it always did. CASPAR replaces this slot alone.
+        pathRankers.put(PathRankerType.Aerospace, basicPathRanker);
+
+        InfantryPathRanker infantryPathRanker = new InfantryPathRanker(this);
+        infantryPathRanker.setPathEnumerator(precognition.getPathEnumerator());
+        pathRankers.put(PathRankerType.Infantry, infantryPathRanker);
+
+        NewtonianAerospacePathRanker newtonianAerospacePathRanker = new NewtonianAerospacePathRanker(this);
+        newtonianAerospacePathRanker.setPathEnumerator(precognition.getPathEnumerator());
+        pathRankers.put(PathRankerType.NewtonianAerospace, newtonianAerospacePathRanker);
+
+        UtilityPathRanker utilityPathRanker = new UtilityPathRanker(this);
+        utilityPathRanker.setPathEnumerator(precognition.getPathEnumerator());
+        pathRankers.put(PathRankerType.Utility, utilityPathRanker);
+    }
+
+    /**
+     * Wiring seam for subclasses (CASPAR): replaces the registered path ranker of the given type, wiring the
+     * replacement to the precognition path enumerator the same way the stock rankers are wired. Call after
+     * {@code super.initializePathRankers()}.
+     *
+     * @param rankerType the ranker slot to replace
+     * @param pathRanker the replacement ranker
+     */
+    protected void registerPathRanker(PathRankerType rankerType, BasicPathRanker pathRanker) {
+        pathRanker.setPathEnumerator(precognition.getPathEnumerator());
+        pathRankers.put(rankerType, pathRanker);
+    }
+
+    /**
+     * Factory seam for subclasses (CASPAR): builds the path finder used for airborne aerodyne units flying
+     * over a ground mapsheet.
+     *
+     * <p>Unlike the low-altitude finder, the stock ground finder drives every path it generates to a single
+     * altitude, so a ranker never gets an altitude to choose between. Overriding this is the only way to put
+     * that choice back without changing what Princess generates.</p>
+     *
+     * @param game the current game
+     *
+     * @return the path finder to enumerate ground-mapsheet aerospace movement with
+     */
+    protected AeroGroundPathFinder aeroGroundPathFinder(Game game) {
+        return AeroGroundPathFinder.getInstance(game);
+    }
+
+    /**
+     * Reduce utility of TAGging something if we're already trying.  Update the utility if it's better, otherwise try to
+     * dissuade the next attacker.
+     */
+    public int computeTeamTagUtility(Targetable te, int damage) {
+        int key = te.getId();
+        if (teamTagTargetsMap.containsKey(key)) {
+            if (teamTagTargetsMap.get(key) > damage) {
+                return damage / 4;
+            }
+        } else {
+            teamTagTargetsMap.put(key, damage);
+        }
+        return damage;
+    }
+
+    /**
+     * Because Aerospace units can either TAG _or_ attack with their weapons, we want every friendly TAG-equipped Aero
+     * (and possibly others) to know about all the possible incoming Homing or IF attacks that could take advantage of
+     * their TAGs, for later calculations.
+     * <p>
+     * Supporters always come from the shooter's own side: our units when we fire the TAG, the visible enemy units when
+     * we estimate an enemy's TAG shot at us.</p>
+     * <p>
+     * Steps are: 1. All relevant guidable attacks (within range of the target) are added to a list. 1a. All Homing
+     * Weapons landing this turn are added to the list. 1b. All IF-capable, Semi-Guided, and Homing weapons that have
+     * not yet fired but _could_ are added as well. 2. Each attacker-target location pair's expected homing/indirect
+     * fire damage is cached for later re-use. 3. During the Indirect phase, when TAG attacks are announced, relevant
+     * units can use this info to decide whether they want to TAG or reserve their activation for actual attacks. 4. All
+     * info is cleared at the start of each Targeting, Movement, Offboard and Firing phase.
+     */
+    public List<WeaponMounted> computeGuidedWeapons(Entity entityToFire, Coords location) {
+        // Key cached entries to firing entity _and_ coordinates, as each shooter may have different targets and weapons
+        // to support.
+        Map.Entry<Integer, Coords> key = Map.entry(entityToFire.getId(), location);
+        if (incomingGuidablesMap.containsKey(key)) {
+            return incomingGuidablesMap.get(key);
+        }
+
+        List<WeaponMounted> friendlyGuidedWeapons = new ArrayList<>();
+
+        // First, friendly incoming homing artillery that will land this turn.  May include entity's own shots from prior
+        // turns, but not from this turn.
+        for (Enumeration<ArtilleryAttackAction> attacks = game.getArtilleryAttacks(); attacks.hasMoreElements(); ) {
+            ArtilleryAttackAction a = attacks.nextElement();
+            if (a.getTurnsTilHit() == 0 &&
+                  a.getAmmoMunitionType().contains(AmmoType.Munitions.M_HOMING) &&
+                  (!a.getEntity(game).isEnemyOf(entityToFire))) {
+                // Must be a shot that should land within 8 hexes of the target hex
+                if (a.getCoords().distance(location) <= Compute.HOMING_RADIUS) {
+                    friendlyGuidedWeapons.add((WeaponMounted) a.getEntity(game).getEquipment(a.getWeaponId()));
+                }
+            }
+        }
+
+        // Next find the Homing-weapon-havers, Indirect-Firers, and LG-Bombers within range on the shooter's own side:
+        // our units when one of ours is the shooter, the visible enemy units when we estimate an enemy's TAG shot.
+        for (Entity supporter : new HashSet<>(getShootersSide(entityToFire))) {
+            if (supporter.equals(entityToFire) || supporter.isEnemyOf(entityToFire)) {
+                continue; // Neither the shooter's own weapons nor a hostile unit's weapons support this TAG
+            }
+            Set<WeaponMounted> candidateWeapons = new HashSet<>();
+            Coords supporterPosition = supporter.getPosition();
+
+            for (WeaponMounted weapon : supporter.getTotalWeaponList()) {
+                // Ignore weapons outside of viable long range; does not apply to bombs.
+                if (supporterPosition.distance(location) > weapon.getType().getLongRange() + supporter.getRunMP()
+                      && !weapon.isGroundBomb()) {
+                    continue;
+                }
+                if (weapon.getType().hasIndirectFire() && !supporter.isAero()) {
+                    // Only care about ground IF weapons.
+                    candidateWeapons.add(weapon);
+                } else if (weapon.getLinked() != null && weapon.getLinked().isHomingAmmoInHomingMode()) {
+                    candidateWeapons.add(weapon);
+                } else if (weapon.isGroundBomb()) {
+                    // Only care about Laser-Guided bombs here; Homing Arrow IV handled separately.
+                    if (hasLaserGuidedBomb((IBomber) supporter)) {
+                        candidateWeapons.add(weapon);
+                    }
+                }
+            }
+
+            // All candidate weapons should be unique instances.
+            friendlyGuidedWeapons.addAll(candidateWeapons);
+        }
+        // Cache result in case needed for later path planning.
+        incomingGuidablesMap.put(key, friendlyGuidedWeapons);
+        return friendlyGuidedWeapons;
+    }
+
+    /**
+     * Returns the units that could follow up a TAG shot by the given shooter: our own units when the shooter is one
+     * of ours or an ally's, and the visible enemy units when the shooter is an enemy whose TAG shot at us we are
+     * estimating.
+     *
+     * @param shooter the unit firing the TAG
+     *
+     * @return the candidate supporting units on the shooter's side, possibly including the shooter itself
+     */
+    private List<Entity> getShootersSide(Entity shooter) {
+        Player shooterOwner = shooter.getOwner();
+        if ((shooterOwner != null) && shooterOwner.isEnemyOf(getLocalPlayer())) {
+            return getEnemyEntities();
+        }
+        return getEntitiesOwned();
+    }
+
+    /**
+     * @param bomber the bomb-carrying unit
+     *
+     * @return {@code true} if any of the unit's bombs is a laser-guided bomb
+     */
+    private static boolean hasLaserGuidedBomb(IBomber bomber) {
+        for (BombMounted bomb : bomber.getBombs()) {
+            if (bomb.getType().getBombType() == BombTypeEnum.LG) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public void changePhase(GamePhase phase) {
+        // Before the phase's own setup runs, so nothing it computes is built on last phase's estimates.
+        if (isTagEstimateResetPhase(phase)) {
+            resetTagEstimateCaches(phase);
+        }
+        super.changePhase(phase);
+        if (phase.isLounge()) {
+            getForcedWithdrawalTracker().forgetWithdrawingUnits();
+        }
+    }
+
+    /**
+     * @return the tracker that decides which of this bot's units withdraw under Forced Withdrawal
+     */
+    public ForcedWithdrawalTracker getForcedWithdrawalTracker() {
+        if (forcedWithdrawalTracker == null) {
+            forcedWithdrawalTracker = new ForcedWithdrawalTracker(this);
+        }
+        return forcedWithdrawalTracker;
+    }
+
+    /**
+     * @return where the player has ordered the unit: "the NORTH edge" for an edge order, else its next waypoint
+     */
+    private String describeOrderedDestination(Entity entity) {
+        Optional<CardinalEdge> orderedEdge = getUnitOrdersFollower().getOrderedEdge(entity);
+        if (orderedEdge.isPresent()) {
+            return Messages.getString("Princess.orders.edge", orderedEdge.get().name());
+        }
+        return getUnitBehaviorTracker().getWaypointForEntity(entity)
+              .map(waypoint -> getUnitOrdersFollower().navLabel(entity, waypoint)).orElse("?");
+    }
+
+    /**
+     * @return how this bot reports on its units' orders
+     */
+    public OrdersRadio getOrdersRadio() {
+        if (ordersRadio == null) {
+            ordersRadio = new OrdersRadio(this);
+        }
+        return ordersRadio;
+    }
+
+    /**
+     * @return the helper that carries out the orders players give this bot's units
+     */
+    public UnitOrdersFollower getUnitOrdersFollower() {
+        if (unitOrdersFollower == null) {
+            unitOrdersFollower = new UnitOrdersFollower(this);
+        }
+        return unitOrdersFollower;
+    }
+
+    /**
+     * Load the list of units withdrawing under forced withdrawal at the time the bot was loaded or the beginning of the
+     * turn, whichever is the more recent. See {@link ForcedWithdrawalTracker#refreshWithdrawingUnits()}.
+     */
+    public void refreshCrippledUnits() {
+        getForcedWithdrawalTracker().refreshWithdrawingUnits();
+    }
+
+    private boolean isEnemyGunEmplacement(final Entity entity, final Coords coords) {
+        return entity.hasETypeFlag(Entity.ETYPE_GUN_EMPLACEMENT) &&
+              !getBehaviorSettings().getIgnoredUnitTargets().contains(entity.getId()) &&
+              entity.getOwner().isEnemyOf(getLocalPlayer()) &&
+              !getStrategicBuildingTargets().contains(coords) &&
+              !entity.isCrippled();
+    }
+
+    private boolean isEnemyBuildingEntity(final Entity entity, final Coords coords) {
+        return entity.hasETypeFlag(Entity.ETYPE_BUILDING_ENTITY) &&
+              !getBehaviorSettings().getIgnoredUnitTargets().contains(entity.getId()) &&
+              entity.getOwner().isEnemyOf(getLocalPlayer()) &&
+              !getStrategicBuildingTargets().contains(coords) &&
+              !entity.isCrippled();
+    }
+
+    private boolean isEnemyInfantry(final Entity entity, final Coords coords) {
+        return entity.hasETypeFlag(Entity.ETYPE_INFANTRY) &&
+              !entity.hasETypeFlag(Entity.ETYPE_MEKWARRIOR) &&
+              !getBehaviorSettings().getIgnoredUnitTargets().contains(entity.getId()) &&
+              entity.getOwner().isEnemyOf(getLocalPlayer()) &&
+              !getStrategicBuildingTargets().contains(coords) &&
+              !entity.isCrippled();
+    }
+
+    @Override
+    public synchronized void die() {
+        super.die();
+        if (precognition != null) {
+            precognition.signalDone();
+            precognitionThread.interrupt();
+        }
+    }
+
+    @Override
+    protected void processChat(final GamePlayerChatEvent ge) {
+        chatProcessor.processChat(ge, this);
+    }
+
+    /**
+     * Given an entity and the current behavior settings, get the "home" edge to which the entity should attempt to
+     * retreat Guaranteed to return a cardinal edge or NONE.
+     */
+    CardinalEdge getHomeEdge(Entity entity) {
+        // a player's edge order for this unit comes first, unless a gamemaster has ordered it to withdraw
+        Optional<CardinalEdge> orderedEdge = getUnitOrdersFollower().getOrderedEdge(entity);
+        if (orderedEdge.isPresent() && (entity.getForcedWithdrawalOrder() != ForcedWithdrawalOrder.WITHDRAW)) {
+            return orderedEdge.get();
+        }
+
+        // if I am withdrawing under forced withdrawal, my home edge is the "retreat" edge - unless the player has
+        // ordered the bot to flee toward an edge, which every unit follows, crippled or not (issue #9038)
+        if (getForcedWithdrawalTracker().isWithdrawing(entity) && !UnitBehavior.isFleeOrdered(this)) {
+            if (getBehaviorSettings().getRetreatEdge() == CardinalEdge.NEAREST) {
+                if (entity.getPosition() == null) {
+                    return CardinalEdge.NONE;
+                }
+                return BoardUtilities.getClosestEdge(entity);
+            } else {
+                return getBehaviorSettings().getRetreatEdge();
+            }
+        }
+
+        // otherwise, return the destination edge
+        if (getBehaviorSettings().getDestinationEdge() == CardinalEdge.NEAREST) {
+            return BoardUtilities.getClosestEdge(entity);
+        } else {
+            return getBehaviorSettings().getDestinationEdge();
+        }
+    }
+
+    public static int calculateAdjustment(final String ticks) {
+        int adjustment = 0;
+        if (StringUtility.isNullOrBlank(ticks)) {
+            return 0;
+        }
+        if (StringUtil.isNumeric(ticks)) {
+            return Integer.parseInt(ticks);
+        }
+
+        for (final char tick : ticks.toCharArray()) {
+            if (PLUS == tick) {
+                adjustment++;
+            } else if (MINUS == tick) {
+                adjustment--;
+            } else {
+                LOGGER.warn("Invalid tick: {}", tick);
+            }
+        }
+        return adjustment;
+    }
+
+    @Override
+    protected void checkMorale() {
+        moraleUtil.checkMorale(behaviorSettings.isForcedWithdrawal(),
+              behaviorSettings.getBraveryIndex(),
+              behaviorSettings.getSelfPreservationIndex(),
+              getLocalPlayer(),
+              game);
+    }
+
+    public IHonorUtil getHonorUtil() {
+        return honorUtil;
+    }
+
+    /**
+     * Lazy-loaded calculation of the "to-hit target number" threshold, below which rapid fire autocannon will fire
+     * multiple shots. More aggressive behavior (left on the Self Preservation slider) start at TN 11 and under, while
+     * less aggressive behavior (right on the slider) start at 4 and under.
+     */
+    public int getSpinUpThreshold() {
+        if (spinUpThreshold == null) {
+            spinUpThreshold = Math.clamp(13 - getBehaviorSettings().getSelfPreservationIndex(), 4, 11);
+        }
+
+        return spinUpThreshold;
+    }
+
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public void resetSpinUpThreshold() {
+        spinUpThreshold = null;
+    }
+
+    @Override
+    public void endOfTurnProcessing() {
+        // Taken before refreshCrippledUnits folds in this turn's damage. Both checkForDishonoredEnemies and
+        // updateReturnFirePermission judge this turn's attacks against who was visibly crippled when those
+        // attacks were declared, not against who is crippled now.
+        final Set<Integer> unitsWithdrawingAtStartOfTurn = getMemory().crippledUnitIds();
+        checkForDishonoredEnemies();
+        checkForBrokenEnemies();
+        // refreshCrippledUnits should happen after checkForDishonoredEnemies, since checkForDishonoredEnemies
+        // wants to examine the units that were considered crippled at the *beginning* of the turn and were attacked.
+        refreshCrippledUnits();
+        // Report after the withdrawing list is fresh, so clients tag and warn about the units this bot will treat as
+        // fleeing next turn. Covers pirates and the forced-withdrawal-off case too.
+        sendDishonoredData();
+        updateReturnFirePermission(unitsWithdrawingAtStartOfTurn);
+        setAMSModes();
+        updateEnemyHeatMaps();
+        updateFriendlyHeatMap();
+        updateExperimentalFeatures();
+        getMemory().forgetUnitsNoLongerInGame(getGame());
+    }
+
+    /**
+     * Grants withdrawing units permission to return fire. A crippled unit under Forced Withdrawal holds its
+     * fire unless an enemy attacks it while it is withdrawing - the same act that marks that enemy
+     * dishonored. So a unit only earns return fire from attacks made after it was already visibly crippled:
+     * the attacks that crippled it this turn were declared against a legitimate target and grant nothing.
+     *
+     * <p>{@code checkForDishonoredEnemies} grants the same permission from the same start-of-turn view, but
+     * only for an attacker still on the board - it looks each one up by id and skips the ones it cannot find.
+     * This pass also covers a withdrawing unit whose attacker was destroyed later in the same turn, because
+     * it only needs to know that the unit was attacked, not by whom.</p>
+     *
+     * @param unitsWithdrawingAtStartOfTurn ids of this bot's units that were already crippled, and so visibly
+     *                                      withdrawing, when this turn's attacks were declared
+     */
+    void updateReturnFirePermission(final Set<Integer> unitsWithdrawingAtStartOfTurn) {
+        if (!getForcedWithdrawal()) {
+            return;
+        }
+        for (final Entity ownedEntity : getEntitiesOwned()) {
+            boolean wasAlreadyWithdrawing = unitsWithdrawingAtStartOfTurn.contains(ownedEntity.getId());
+            boolean wasAttackedThisTurn = !ownedEntity.getAttackedByThisTurn().isEmpty();
+            if (!wasAlreadyWithdrawing || !wasAttackedThisTurn) {
+                continue;
+            }
+            if (getMemory().rememberAttackedWhileFleeing(ownedEntity.getId())) {
+                LOGGER.info("[ForcedWithdrawal] {} was attacked while already crippled and withdrawing; may "
+                      + "return fire from now on.", ownedEntity.getDisplayName());
+            }
+        }
+    }
+
+    private void updateExperimentalFeatures() {
+        if (getBehaviorSettings().isExperimental()) {
+            updateSwarmContext();
+        }
+    }
+
+    private void updateSwarmContext() {
+        SwarmContext swarmContext = getSwarmContext();
+        EnemyTracker enemyTracker = getEnemyTracker();
+        if (swarmContext == null || enemyTracker == null || coverageValidator == null || swarmCenterManager == null) {
+            return;
+        }
+
+        swarmContext.setCurrentCenter(swarmCenterManager.calculateCenter());
+        enemyTracker.updateThreatAssessment(swarmContext.getCurrentCenter());
+        swarmContext.assignClusters(getFriendEntities());
+        swarmContext.resetEnemyTargets();
+
+        for (var entity : getEntitiesOwned()) {
+            if (entity.isDeployed()) {
+                swarmContext.removeAllStrategicGoalsOnCoordsQuadrant(entity.getPosition());
+            }
+        }
+    }
+
+    @Override
+    protected void handlePacket(final Packet c) {
+        final StringBuilder msg = new StringBuilder("Received packet, cmd: " + c.command());
+        try {
+            super.handlePacket(c);
+            getPrecognition().handlePacket(c);
+        } finally {
+            LOGGER.trace(msg.toString());
+        }
+    }
+
+    /**
+     * sends a load game file to the server
+     */
+    @Override
+    public void sendLoadGame(final File f) {
+        precognition.resetGame();
+        super.sendLoadGame(f);
+    }
+
+    public void sendPrincessSettings() {
+        send(new Packet(PacketCommand.PRINCESS_SETTINGS, behaviorSettings, getAIType()));
+    }
+
+    /**
+     * Reports to the server which players this bot currently considers dishonored, whether it follows Forced
+     * Withdrawal, and which of its units are withdrawing. Clients use it to tag withdrawing units and to warn a human
+     * player before committing an action that would newly dishonor them. The dishonored set is fully resolved - it
+     * already accounts for pirates having no honor to give - so a receiving client only needs a membership test.
+     */
+    public void sendDishonoredData() {
+        BotHonorReport report = buildHonorReport();
+        LOGGER.debug("[HonorNag] {} reports: forced withdrawal {}, withdrawing units {}, dishonored players {}",
+              getName(), report.followsForcedWithdrawal(), report.withdrawingUnitIds(),
+              report.dishonoredPlayerIds());
+        send(new Packet(PacketCommand.PRINCESS_DISHONORED, report));
+    }
+
+    /**
+     * @return this bot's honor report. The withdrawing units are the ones it will treat as fleeing when it judges the
+     *       coming turn's attacks, including units a gamemaster ordered to withdraw even when the bot itself ignores
+     *       Forced Withdrawal. Package-visible for testing.
+     */
+    BotHonorReport buildHonorReport() {
+        return new BotHonorReport(resolveDishonoredPlayerIds(), getForcedWithdrawal(),
+              getForcedWithdrawalTracker().withdrawingUnitIds());
+    }
+
+    /**
+     * @return the player IDs this bot currently considers dishonored, fully resolved so that pirates (which have no
+     *       honor to give) report every player. Package-visible for testing.
+     */
+    List<Integer> resolveDishonoredPlayerIds() {
+        List<Integer> dishonoredPlayerIds = new ArrayList<>();
+        for (Player player : getGame().getPlayersList()) {
+            if (getHonorUtil().isEnemyDishonored(player.getId())) {
+                dishonoredPlayerIds.add(player.getId());
+            }
+        }
+        return dishonoredPlayerIds;
+    }
+
+    @Override
+    protected void sendBotSettingsToServer() {
+        sendPrincessSettings();
+    }
+
+    @Override
+    protected void disconnected() {
+        if (precognition != null) {
+            precognition.signalDone();
+            precognitionThread.interrupt();
+        }
+        super.disconnected();
+    }
+
+    int getHighestEnemyInitiativeId() {
+        int highestEnemyInitiativeBonus = -1;
+        int highestEnemyInitiativeId = -1;
+        for (final Entity entity : getEnemyEntities()) {
+            final int initBonus = entity.getHQIniBonus() + entity.getQuirkIniBonus();
+            if (initBonus > highestEnemyInitiativeBonus) {
+                highestEnemyInitiativeBonus = initBonus;
+                highestEnemyInitiativeId = entity.getId();
+            }
+        }
+        return highestEnemyInitiativeId;
+    }
+
+    /**
+     * Helper function to perform some modifications to a given path. Intended to happen after we pick the best path.
+     *
+     * @param path The ranked path to process
+     *
+     * @return Altered move path
+     */
+    private MovePath performPathPostProcessing(final RankedPath path) {
+        return performPathPostProcessing(path.getPath(), path.getExpectedDamage());
+    }
+
+    /**
+     * Helper function to perform some modifications to a given path.
+     *
+     * @param path           The move path to process
+     * @param expectedDamage The damage expected to be done by the unit as a result of the path
+     *
+     * @return Altered move path
+     */
+    private MovePath performPathPostProcessing(MovePath path, double expectedDamage) {
+        // Everything below is an embellishment on a path that has already been chosen: evading, a searchlight,
+        // unloading, fleeing at the end. None of it is the move itself. Letting one of them throw used to cost
+        // the whole turn - the caller logs "MP is now null!", submits nothing, and the game waits for a bot
+        // that will never answer. That is not hypothetical: an ejected pilot mis-cast in evadeIfNotFiring hung
+        // a game this way (issue #8542), and Compute.isPilotingSkillNeeded still throws outright when the game
+        // has forgotten an entity mid-calculation, which the bot's own turn thread can race into.
+        //
+        // So an embellishment that fails now costs only itself. The path the ranker chose is still a legal,
+        // fully-formed move, and moving is always better than standing still because a searchlight failed.
+        try {
+            return embellishPath(path, expectedDamage);
+        } catch (Exception exception) {
+            LOGGER.error(exception, "Post-processing failed for " + path.getEntity().getDisplayName()
+                  + "; using the un-embellished path rather than losing the turn");
+            return path;
+        }
+    }
+
+    /**
+     * The optional extras applied to a path once it has been chosen: evading, searchlight, unloading, launching,
+     * abandoning, unjamming, aero flight-path fix-up, and fleeing.
+     *
+     * @param path           The move path to process
+     * @param expectedDamage The damage expected to be done by the unit as a result of the path
+     *
+     * @return Altered move path
+     */
+    private MovePath embellishPath(MovePath path, double expectedDamage) {
+        MovePath retVal = path;
+        // Guard on expectedDamage > 0, not >= 0: expected damage is never negative, so >= 0 was always true. That
+        // left evadeIfNotFiring (which only evades when NOT able to inflict damage) permanently dead, and turned
+        // the searchlight on even with no firing solution, giving away position for nothing.
+        boolean canInflictDamage = expectedDamage > 0;
+        evadeIfNotFiring(retVal, canInflictDamage);
+        turnOnSearchLight(retVal, canInflictDamage);
+        unloadTransportedInfantry(retVal);
+        launchFighters(retVal);
+        abandonShip(retVal);
+        unjamRAC(retVal, expectedDamage >= 5);
+
+        // if we are using vector movement, there's a whole bunch of post-processing that happens to
+        // aircraft flight paths when a player does it, so we apply it here.
+        if (path.getEntity().isAero() || (path.getEntity() instanceof EjectedCrew && path.getEntity().isSpaceborne())) {
+            retVal = SharedUtility.moveAero(retVal, null);
+        }
+
+        // allow fleeing at end of movement if is falling back and can flee from position
+        if ((isFallingBack(path.getEntity())) &&
+              (path.getLastStep() != null) &&
+              (getGame().canFleeFrom(path.getEntity(), path.getLastStep().getPosition())) &&
+              (path.getMpUsed() < path.getMaxMP())) {
+            path.addStep(MoveStepType.FLEE);
+        }
+
+        return retVal;
+    }
+
+    /**
+     * Helper function that appends an unjam RAC command to the end of a qualifying path.
+     *
+     * @param path The path to process.
+     */
+    private void unjamRAC(MovePath path, boolean expectFiveOrMore) {
+        if (path.getEntity().canUnjamRAC() &&
+              (path.getMpUsed() <= path.getEntity().getWalkMP()) &&
+              !path.isJumping() &&
+              !expectFiveOrMore) {
+            path.addStep(MoveStepType.UNJAM_RAC);
+        }
+    }
+
+    /**
+     * Helper function that insinuates an "evade" step for aircraft that will not be shooting.
+     *
+     * @param path The path to process
+     */
+    private void evadeIfNotFiring(MovePath path, boolean possibleToInflictDamage) {
+        Entity pathEntity = path.getEntity();
+
+        // Only aerospace units (IAero) can take an EVADE step. An ejected pilot descending by
+        // parachute is a MekWarrior that reports isAirborne() (altitude > 0) but is not an IAero;
+        // without this guard the isAirborne()-only check below would throw a ClassCastException on
+        // the cast to IAero and hang the bot's entire turn (issue #8542).
+        if (!(pathEntity instanceof IAero aero)) {
+            return;
+        }
+
+        // we cannot evade if we are out of control
+        if (pathEntity.isAero() && pathEntity.isAirborne() && aero.isOutControlTotal()) {
+            return;
+        }
+
+        // if we're an airborne aircraft
+        // and we're not going to do any damage anyway
+        // and we can do so without causing a PSR
+        // then evade
+        if (pathEntity.isAirborne() &&
+              !possibleToInflictDamage &&
+              (path.getMpUsed() <= AeroPathUtil.calculateMaxSafeThrust(aero) - 2)) {
+            path.addStep(MoveStepType.EVADE);
+        }
+    }
+
+    /**
+     * Turn on the searchlight if we expect to be shooting at something and it's dark out
+     *
+     * @param path                    Path being considered
+     * @param possibleToInflictDamage Whether we expect to be shooting at something.
+     */
+    private void turnOnSearchLight(MovePath path, boolean possibleToInflictDamage) {
+        Entity pathEntity = path.getEntity();
+        boolean option = path.getGame().getOptions().booleanOption(OptionsConstants.SEARCHLIGHTS_ON);
+        LOGGER.debug("Princess.turnOnSearchLight: entity={} SEARCHLIGHTS_ON={} damage={} hasSL={} usingSL={} isDark={}",
+              pathEntity.getDisplayName(), option, possibleToInflictDamage,
+              pathEntity.hasSearchlight(), pathEntity.isUsingSearchlight(),
+              path.getGame().getPlanetaryConditions().getLight().isDuskOrFullMoonOrMoonlessOrPitchBack());
+        // Respect the "Searchlights On by Default" game option - if disabled, Princess won't
+        // auto-enable searchlights either (they give away position under double-blind).
+        if (!option) {
+            return;
+        }
+        if (possibleToInflictDamage &&
+              pathEntity.hasSearchlight() &&
+              !pathEntity.isUsingSearchlight() &&
+              path.getGame().getPlanetaryConditions().getLight().isDuskOrFullMoonOrMoonlessOrPitchBack()) {
+            LOGGER.debug("Princess adding SEARCHLIGHT step for {}", pathEntity.getDisplayName());
+            path.addStep(MoveStepType.SEARCHLIGHT);
+        }
+    }
+
+    /**
+     * Helper function that adds an "unload" step for units that are transporting infantry if the conditions for
+     * unloading are favorable.
+     * <p>
+     * Infantry unloading logic is different from, for example, hot-dropping Meks or launching aerospace fighters, so we
+     * handle it separately.
+     *
+     * @param path The path to modify
+     */
+    private void unloadTransportedInfantry(MovePath path) {
+        // if my objective is to cross the board, even though it's tempting, I won't be leaving the infantry
+        // behind. They're not that good at screening against high speed pursuit anyway.
+        if (getBehaviorSettings().shouldAutoFlee()) {
+            return;
+        }
+
+        final Entity movingEntity = path.getEntity();
+        final Coords pathEndpoint = path.getFinalCoords();
+        final boolean carrierAirborne = AirborneDismountRules.isCarrierAirborne(movingEntity,
+              getGame().getBoard(path.getFinalBoardId()).getHex(pathEndpoint), path.getFinalElevation());
+        Targetable closestEnemy = getPathRanker(movingEntity).findClosestEnemy(movingEntity,
+              pathEndpoint,
+              getGame(),
+              false);
+
+        // if there are no enemies on the board, then we're not unloading anything.
+        // infantry can't clear hexes, so let's not unload them for that purpose
+        if ((closestEnemy == null) || (closestEnemy.getTargetType() == Targetable.TYPE_HEX_CLEAR)) {
+            return;
+        }
+
+        int distanceToClosestEnemy = pathEndpoint.distance(closestEnemy.getPosition());
+
+        // loop through all entities carried by the current entity
+        for (Transporter transport : movingEntity.getTransports()) {
+            // this operation is intended for entities on the ground
+            if (transport instanceof Bay) {
+                continue;
+            }
+
+            for (Entity loadedEntity : transport.getLoadedUnits()) {
+                // there's really no good reason for Princess to disconnect trailers.
+                // Let's skip those for now. We don't want to create a bogus 'unload' step for them anyhow.
+                if (loadedEntity.isTrailer() && loadedEntity.getTowedBy() != Entity.NONE) {
+                    continue;
+                }
+                // Only jump and VTOL infantry may leave a VTOL or WiGE that has not landed (TW p.225, errata v12.0)
+                if (carrierAirborne
+                      && !AirborneDismountRules.canDismountFromAirborneCarrier(getGame(), movingEntity, loadedEntity)) {
+                    continue;
+                }
+                // favorable conditions include:
+                // - the loaded entity should be able to enter the current terrain
+                // - the loaded entity should be within max weapons range + movement range of an enemy
+                // - unloading the loaded entity cannot violate stacking limits
+                // - only one unit
+
+                // this condition is a simple check that we're not unloading infantry into deep space
+                // or into lava or some other such nonsense
+                boolean unloadFatal = loadedEntity.isBoardProhibited(getGame().getBoard(path.getFinalBoardId())) ||
+                      loadedEntity.isLocationProhibited(pathEndpoint) ||
+                      loadedEntity.isLocationDeadly(pathEndpoint);
+
+                // Unloading a unit may sometimes cause a stacking violation, take that into account when planning
+                boolean unloadIllegal = Compute.stackingViolation(getGame(),
+                      loadedEntity,
+                      pathEndpoint,
+                      movingEntity,
+                      loadedEntity.climbMode(),
+                      true) != null;
+
+                // this is a primitive condition that checks whether we're within "engagement range" of an enemy
+                // where "engagement range" is defined as the maximum range of our weapons plus our walking movement
+                boolean inEngagementRange = loadedEntity.getWalkMP() + getMaxWeaponRange(loadedEntity) >=
+                      distanceToClosestEnemy;
+
+                if (!unloadFatal && !unloadIllegal && inEngagementRange) {
+                    path.addStep(MoveStepType.UNLOAD, loadedEntity, pathEndpoint);
+                    return; // we can only unload one infantry unit per hex per turn, so once we've unloaded, we're done.
+                }
+            }
+        }
+    }
+
+    /**
+     * Helper function that adds an "launch" step for units that are transporting launch-able units in some kind of
+     * bay.
+     */
+    private void launchFighters(MovePath path) {
+        // if my objective is to cross the board, even though it's tempting, I won't be leaving the aerospace
+        // behind. They're not that good at screening against high speed pursuit anyway.
+        if (getBehaviorSettings().shouldAutoFlee()) {
+            return;
+        }
+
+        Entity movingEntity = path.getEntity();
+        Coords pathEndpoint = path.getFinalCoords();
+        int finalBoardId = path.getFinalBoardId();
+        Targetable closestEnemy = getPathRanker(movingEntity).findClosestEnemy(movingEntity,
+              pathEndpoint,
+              getGame(),
+              false);
+
+        // Don't launch at high velocity in atmosphere or the fighters will be destroyed!
+        if (path.getFinalVelocity() > 2 && !game.getBoard(finalBoardId).isSpace()) {
+            return;
+        }
+
+        // if there are no enemies on the board, then we're not launching anything.
+        if ((closestEnemy == null) || (closestEnemy.getTargetType() != Targetable.TYPE_ENTITY)) {
+            return;
+        }
+
+        TreeMap<Integer, Vector<Integer>> unitsToLaunch = new TreeMap<>();
+        boolean executeLaunch = false;
+
+        // loop through all fighter (or small craft) bays in the current entity
+        // grouping launched craft by bay to limit launches to 'safe' rate.
+        Vector<Bay> fighterBays = movingEntity.getFighterBays();
+
+        for (int bayIndex = 0; bayIndex < fighterBays.size(); bayIndex++) {
+            Bay bay = fighterBays.get(bayIndex);
+
+            for (Entity loadedEntity : bay.getLaunchableUnits()) {
+                unitsToLaunch.putIfAbsent(bayIndex, new Vector<>());
+
+                // for now, just launch fighters at the 'safe' rate
+                if (unitsToLaunch.get(bayIndex).size() < bay.getSafeLaunchRate()) {
+                    unitsToLaunch.get(bayIndex).add(loadedEntity.getId());
+                    executeLaunch = true;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // only add the step if we're actually launching something
+        if (executeLaunch) {
+            path.addStep(MoveStepType.LAUNCH, unitsToLaunch);
+        }
+    }
+
+    protected boolean shouldAbandon(Entity entity) {
+        boolean shouldAbandon = false;
+        // Nonfunctional entity?  Abandon!
+        if ((entity.isPermanentlyImmobilized(true) ||
+              entity.isCrippled() ||
+              entity.isShutDown() ||
+              entity.isDoomed()) && (entity.getAltitude() < 1)) {
+            shouldAbandon = true;
+        } else if (entity instanceof Tank tank) {
+            // Immobile tank?  Abandon!
+            // Ground-bound VTOL?  Abandon!
+            if (tank.isImmobile()) {
+                shouldAbandon = true;
+            }
+        } else if ((entity instanceof Aero aero && aero.getAltitude() < 1 && !aero.isAirborne())) {
+            // Aero and unable to take off?  Abandon!
+            if (!aero.canTakeOffHorizontally() && !aero.canTakeOffVertically()) {
+                shouldAbandon = true;
+            }
+            // Aero and no clearance to take off?  You guessed it: straight to Abandon!
+            if (aero.canTakeOffHorizontally() && (aero.hasRoomForHorizontalTakeOff() != null)) {
+                shouldAbandon = true;
+            }
+            // Effectively immobile Aerospace?  Believe it or not, Abandon!
+            if (EntityMovementType.MOVE_NONE == aero.moved && EntityMovementType.MOVE_NONE == aero.movedLastRound) {
+                shouldAbandon = true;
+            }
+        }
+        return shouldAbandon;
+    }
+
+    protected void abandonShipOneUnit(Entity movingEntity, Vector<Transporter> transporters, MovePath path) {
+        // Set dismount locations: this hex / adjacent hexes / outer-ring adjacent hexes
+        final Board board = game.getBoard(path.getFinalBoardId());
+        List<Coords> dismountLocations = List.of(movingEntity.getPosition());
+        if (movingEntity.isDropShip() || movingEntity.isSmallCraft() ||
+              (movingEntity.isSupportVehicle() && movingEntity.isSuperHeavy())) {
+            int distance = (movingEntity.isDropShip()) ? 2 : 1;
+            dismountLocations = movingEntity.getPosition()
+                  .allAtDistance(distance)
+                  .stream()
+                  .filter(board::contains)
+                  .toList();
+        }
+
+        int dismountIndex;
+        int unitsUnloaded;
+
+        for (Transporter transporter : transporters) {
+            // Roundabout bookkeeping method required by the fact that we do multiple dismounts by
+            // giving the carrier multiple _turns_; we leave and return to this method several times in one round.
+            unitsUnloaded = transporter.getNumberUnloadedThisTurn();
+
+            // Infantry can stack
+            dismountIndex = unitsUnloaded / ((transporter instanceof InfantryTransporter) ? 2 : 1);
+
+            Vector<Entity> entityList;
+            int currentDoors;
+            if (transporter instanceof InfantryTransporter infantryTransporter) {
+                entityList = infantryTransporter.getLoadedUnits();
+                currentDoors = infantryTransporter.getCurrentDoors();
+            } else if (transporter instanceof Bay bay) {
+                entityList = bay.getLoadedUnits();
+                currentDoors = bay.getCurrentDoors();
+            } else {
+                // Currently unhandled.
+                continue;
+            }
+            for (Entity loadedEntity : entityList) {
+                if (dismountIndex >= dismountLocations.size()) {
+                    // Exhausted dismount locations
+                    break;
+                }
+                Coords dismountLocation = dismountLocations.get(dismountIndex);
+
+                // for now, just unload transporters at 'safe' rate
+                // (1 per transporter door per turn except for infantry which limited by adj. hexes, TW 91)
+                int maxDismountsPerBay = (loadedEntity.isInfantry()) ? Integer.MAX_VALUE : currentDoors;
+                if (unitsUnloaded < maxDismountsPerBay) {
+                    while (dismountIndex < dismountLocations.size()) {
+                        // this condition is a simple check that we're not unloading units into fatal conditions
+                        boolean unloadFatal = loadedEntity.isBoardProhibited(board) ||
+                              loadedEntity.isLocationProhibited(dismountLocation) ||
+                              loadedEntity.isLocationDeadly(dismountLocation);
+
+                        // Unloading a unit may sometimes cause a stacking violation, take that into account when planning
+                        boolean unloadIllegal = Compute.stackingViolation(getGame(),
+                              loadedEntity,
+                              dismountLocation,
+                              (dismountLocations.size() == 1) ? movingEntity : null,
+                              loadedEntity.climbMode(),
+                              true) != null;
+
+                        if (unloadIllegal) {
+                            // Try the next hex
+                            dismountIndex++;
+                        } else if (!unloadFatal) {
+                            // Princess *has* to track this as we don't see entity updates
+                            // to our local game instance until movement is fully done!
+                            movingEntity.unload(loadedEntity);
+                            loadedEntity.setUnloaded(true);
+                            loadedEntity.setTransportId(Entity.NONE);
+
+                            path.addStep(MoveStepType.UNLOAD, loadedEntity, dismountLocation);
+                            return;
+                        } else {
+                            // Still increase the index so the loop finishes!
+                            dismountIndex++;
+                        }
+                    }
+                } else {
+                    // Hit the max for this bay
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Helper function that starts unloading a transport if it is crippled, doomed, unable to move, or otherwise no
+     * longer functional as transport. We don't care if there are enemies on the board here; get the units out as soon
+     * as possible. Returns after one unload b/c MovePathHandler will give us another Turn if we still have more to
+     * unload (up to standard limits).
+     *
+     * @param path MovePath that brought us here.
+     */
+    private void abandonShip(MovePath path) {
+        // Can Unload?
+        Entity movingEntity = path.getEntity();
+
+        // If no method of carrying units, skip it.
+        Vector<Transporter> transporters = movingEntity.getTransports();
+        if (transporters == null || transporters.isEmpty()) {
+            return;
+        }
+
+        // Should Unload?
+        // If this entity is still able to maneuver and fight, don't abandon it yet.
+        if (!shouldAbandon(movingEntity)) {
+            return;
+        }
+
+        // Unload What, Where?
+        abandonShipOneUnit(movingEntity, transporters, path);
+    }
+
+    /**
+     * Sets the mode for AMS on each unit this bot controls. This may be on or off, and possibly manual fire if the game
+     * options allow it, with any change taking effect next round. Normal setting is to have the AMS active/automatic.
+     * It may be turned off to conserve ammo on relatively undamaged units, and laser AMS may be turned off to help
+     * reduce overheating. Manual use is reserved as an emergency anti-infantry measure.
+     */
+    private void setAMSModes() {
+
+        // Get conventional infantry if manual mode is available
+        List<Entity> enemyInfantry = new ArrayList<>();
+        if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_COMBAT_TAC_OPS_MANUAL_AMS)) {
+            for (Entity curEnemy : getEnemyEntities()
+                  .stream()
+                  .filter(Entity::isDeployed)
+                  .collect(Collectors.toSet())) {
+                if (curEnemy.getPosition() != null && curEnemy.isVisibleToEnemy()) {
+
+                    if (curEnemy instanceof Infantry && !(curEnemy instanceof EjectedCrew)) {
+                        enemyInfantry.add(curEnemy);
+                    }
+
+                }
+            }
+        }
+
+        for (Entity curEntity : getEntitiesOwned()) {
+            if (!curEntity.isDeployed() || curEntity.getPosition() == null) {
+                continue;
+            }
+
+            List<WeaponMounted> activeAMS = curEntity.getWeaponList()
+                  .stream()
+                  .filter(w -> w.getType().hasFlag(AmmoWeapon.F_AMS) && w.hasModes())
+                  .toList();
+
+            if (!activeAMS.isEmpty()) {
+
+                // Set default to on/automatic and test to see if it should be off or manual instead
+                EquipmentMode newAMSMode = EquipmentMode.getMode(Weapon.MODE_AMS_ON);
+
+                boolean isOverheating = (curEntity instanceof Mek) && (curEntity.getHeat() >= MAX_OVERHEAT_AMS);
+
+                // If there are enough nearby enemy infantry (only counted if the game option is
+                // set), choose manual fire
+                if (!enemyInfantry.isEmpty() && !curEntity.isAirborne()) {
+                    int infantryRange = enemyInfantry.stream()
+                          .mapToInt(e -> Compute.effectiveDistance(game, curEntity, e))
+                          .min()
+                          .getAsInt();
+                    if (infantryRange <= 3) {
+                        newAMSMode = EquipmentMode.getMode(Weapon.MODE_AMS_MANUAL);
+                    }
+                }
+
+                // If AMS was used manually this round, chances are it will be needed next round too
+                if (usedManualAMS(curEntity.getId())) {
+                    newAMSMode = EquipmentMode.getMode(Weapon.MODE_AMS_MANUAL);
+                }
+
+                for (WeaponMounted curAMS : activeAMS) {
+
+                    EquipmentMode curMode = curAMS.curMode();
+
+                    // Turn off laser AMS to help with overheating problems
+                    if (curAMS.getType().hasFlag(WeaponType.F_ENERGY)) {
+                        if (isOverheating) {
+                            newAMSMode = EquipmentMode.getMode(Weapon.MODE_AMS_OFF);
+                        }
+                    } else {
+
+                        // Determine if ammo needs to be conserved
+                        boolean conserveAmmo = curAMS.getLinkedAmmo().getUsableShotsLeft() <=
+                              (int) Math.floor(curAMS.getOriginalShots() *
+                                    behaviorSettings.getSelfPreservationValue() /
+                                    100.0);
+
+                        // Consider turning off AMS to conserve ammo unless it's needed for infantry
+                        if (conserveAmmo && !newAMSMode.equals(Weapon.MODE_AMS_MANUAL)) {
+
+                            int ammoTN = 12 - behaviorSettings.getBraveryIndex();
+
+                            // Fighting a missile boat is more likely to require an active AMS
+                            int lastTargetID = curEntity.getLastTarget();
+                            if (lastTargetID >= 0) {
+                                Entity lastTarget = game.getEntity(lastTargetID);
+                                if (lastTarget != null && lastTarget.getRole() == UnitRole.MISSILE_BOAT) {
+                                    ammoTN += 4;
+                                }
+                            }
+
+                            // Heavily damaged units are more likely to require an active AMS than
+                            // lightly damaged ones
+                            switch (curEntity.getDamageLevel()) {
+                                case Entity.DMG_NONE:
+                                    ammoTN -= 4;
+                                    break;
+                                case Entity.DMG_LIGHT:
+                                    ammoTN -= 2;
+                                    break;
+                                case Entity.DMG_MODERATE:
+                                    ammoTN += 1;
+                                    break;
+                                case Entity.DMG_HEAVY:
+                                    ammoTN += 4;
+                                case Entity.DMG_CRIPPLED:
+                                    ammoTN += 8;
+                                    break;
+                                default:
+                                    break;
+                            }
+
+                            if (ammoTN < 10) {
+                                if (Compute.d6(2) >= ammoTN) {
+                                    newAMSMode = EquipmentMode.getMode(Weapon.MODE_AMS_OFF);
+                                }
+                            }
+
+                        }
+
+                    }
+
+                    // Set the mode for the AMS to get the new mode number, and register the change
+                    // with the server
+                    if (!curMode.equals(newAMSMode)) {
+                        int modeNumber = curAMS.setMode(newAMSMode.getName());
+                        if (modeNumber != -1) {
+                            sendModeChange(curEntity.getId(), curEntity.getEquipmentNum(curAMS), modeNumber);
+                        }
+                    }
+
+                }
+
+            }
+
+        }
+
+        // Clear the manual AMS tracking list for next round
+        clearManualAMSIds();
+    }
+
+    /**
+     * Flag an entity as having used manual AMS this round
+     */
+    public void flagManualAMSUse(int id) {
+        if (manualAMSIds == null) {
+            manualAMSIds = new ArrayList<>();
+        }
+        if (!manualAMSIds.contains(id)) {
+            manualAMSIds.add(id);
+        }
+    }
+
+    public boolean usedManualAMS(int id) {
+        if (manualAMSIds == null) {
+            manualAMSIds = new ArrayList<>();
+            return false;
+        }
+        return manualAMSIds.contains(id);
+    }
+
+    /**
+     * Clear the manual AMS tracking list
+     */
+    public void clearManualAMSIds() {
+        if (manualAMSIds == null) {
+            manualAMSIds = new ArrayList<>();
+        }
+        manualAMSIds.clear();
+    }
+
+    /**
+     * Get a list of all hot spots (positions of high activity) for opposing units
+     */
+    public List<Coords> getEnemyHotSpots() {
+        // A linked set drops duplicates without rescanning the list, and keeps the first-seen order
+        Set<Coords> accumulatedHotSpots = new LinkedHashSet<>();
+        for (HeatMap curMap : getMemory().getEnemyHeatMaps()) {
+            List<Coords> mapHotSpots = curMap.getHotSpots();
+            if (mapHotSpots != null) {
+                accumulatedHotSpots.addAll(mapHotSpots);
+            }
+        }
+
+        return new ArrayList<>(accumulatedHotSpots);
+    }
+
+    /**
+     * Get the best hot spot (positions of high activity) for friendly units
+     *
+     * @return {@code Coords} with high friendly activity; may return null
+     */
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public Coords getFriendlyHotSpot() {
+        return getMemory().getFriendlyHeatMap().getHotSpot();
+    }
+
+    /**
+     * Get the nearest top-rated hot spot for friendly units
+     */
+    public Coords getFriendlyHotSpot(Coords testPosition) {
+        HeatMap friendlyHeatMap = getMemory().getFriendlyHeatMap();
+        return friendlyHeatMap == null ? null : friendlyHeatMap.getHotSpot(testPosition, true);
+    }
+
+    /**
+     * Set up heat maps to track enemy unit positions over time
+     */
+    protected void initEnemyHeatMaps() {
+        List<HeatMap> enemyHeatMaps = new ArrayList<>();
+        int princessTeamId = getGame().getTeamForPlayer(getLocalPlayer()).getId();
+        for (Team curTeam : getGame().getTeams()) {
+            if (curTeam.getId() != princessTeamId) {
+                HeatMap newMap = new HeatMap(curTeam.getId());
+                newMap.setMapTrimThreshold(0.5);
+                newMap.setActivityDecay(-200);
+                enemyHeatMaps.add(newMap);
+            }
+        }
+        getMemory().setEnemyHeatMaps(enemyHeatMaps);
+    }
+
+    /**
+     * Set up heat map to track friendly units over time
+     */
+    protected void initFriendlyHeatMap() {
+        HeatMap friendlyHeatMap = new HeatMap(getGame().getTeamForPlayer(getLocalPlayer()).getId());
+        friendlyHeatMap.setMovementWeightValue(5);
+        friendlyHeatMap.setMapTrimThreshold(0.6);
+        friendlyHeatMap.setActivityDecay(-200);
+        friendlyHeatMap.setIsTrackingFriendlyTeam(true);
+        getMemory().setFriendlyHeatMap(friendlyHeatMap);
+    }
+
+    /**
+     * Update the heat maps with known enemy unit positions, then apply decay
+     */
+    protected void updateEnemyHeatMaps() {
+
+        List<Entity> trackedEntities = getGame().inGameTWEntities()
+              .stream()
+              .filter(HeatMap::validateForTracking)
+              .collect(Collectors.toList());
+
+        // Process entities into each heat map, then age it
+        for (HeatMap curMap : getMemory().getEnemyHeatMaps()) {
+            if (!trackedEntities.isEmpty()) {
+                curMap.updateTrackers(trackedEntities);
+            }
+            curMap.ageMaps(game);
+        }
+    }
+
+    /**
+     * Update the heat map with allied unit positions (entities controlled by this bot have already been processed as
+     * they move), then apply decay
+     */
+    protected void updateFriendlyHeatMap() {
+        HeatMap friendlyHeatMap = getMemory().getFriendlyHeatMap();
+
+        List<Entity> trackedEntities = getGame().inGameTWEntities()
+              .stream()
+              .filter(e -> e.getOwner().getId() != getLocalPlayer().getId() &&
+                    HeatMap.validateForTracking(e))
+              .collect(Collectors.toList());
+
+        if (!trackedEntities.isEmpty()) {
+            friendlyHeatMap.updateTrackers(trackedEntities);
+        }
+        // Units may have skidded, fallen, etc. and need their actual last position updated
+        friendlyHeatMap.refreshLastKnownCache(game);
+        friendlyHeatMap.ageMaps(game);
+    }
+
+
+    /**
+     * Sends a visible chat readback when the bot declares a spot, so a playtester can see at a glance when Princess is
+     * spotting for indirect fire. The detailed decision (and the reason on the failure path) is logged with the
+     * {@code [Spot]} tag in princess.log.
+     *
+     * <p>A hidden unit gets no chat readback. Spotting does not break concealment (TW p.259), but chat is broadcast
+     * to every player, so naming the spotter would hand the enemy the unit and its location anyway. The {@code [Spot]}
+     * log entry is still written, so playtesting visibility is unaffected.</p>
+     *
+     * <p>Package-private rather than private so the hidden-unit guard can be tested directly.</p>
+     *
+     * @param spotAction The action the fire control returned (a no-op for anything that is not a {@link SpotAction})
+     * @param spotter    The unit doing the spotting
+     */
+    void announceSpotting(final EntityAction spotAction, final Entity spotter) {
+        if ((spotAction instanceof SpotAction spot) && !spotter.isHidden()) {
+            Entity target = getGame().getEntity(spot.getTargetId());
+            String targetName = (target != null) ? target.getShortName() : Integer.toString(spot.getTargetId());
+            sendChat(Messages.getString("Princess.spotting", spotter.getShortName(), targetName), Level.INFO);
+        }
+    }
+
+    public void sendChat(final String message, final Level logLevel) {
+        if (LOGGER.getLevel().isLessSpecificThan(logLevel)) {
+            super.sendChat(message);
+        }
+    }
+
+    /**
+     * Override for the 'receive entity update' handler Updates internal state in addition to base client functionality
+     */
+    @Override
+    public void receiveEntityUpdate(final Packet packet) throws InvalidPacketDataException {
+        super.receiveEntityUpdate(packet);
+        updateEntityState((Entity) packet.getObject(1));
+    }
+
+    public SwarmContext getSwarmContext() {
+        return getMemory().getSwarmContext();
+    }
+
+    public EnemyTracker getEnemyTracker() {
+        return getMemory().getEnemyTracker();
+    }
+
+    public CoverageValidator getCoverageValidator() {
+        return coverageValidator;
+    }
+
+    @Deprecated(since = "0.51.0", forRemoval = true)
+    public SwarmCenterManager getSwarmCenterManager() {
+        return swarmCenterManager;
+    }
+
+    @Override
+    protected void postMovementProcessing() {
+        getUnitOrdersFollower().advanceRoutes();
+    }
+
+    public ArtilleryCommandAndControl getArtilleryCommandAndControl() {
+        return artilleryCommandAndControl;
+    }
+
+    /**
+     * Given an entity that just moved, decide if I should reveal any entities in response
+     */
+    @Override
+    protected void revealEntities(int movedEntityID) {
+    	// for each hidden entity I own
+    	// calculate a firing plan to the moved entity as if it wasn't hidden
+    	// if the firing plan has good odds to hit (based on aggression rating)
+    	// then send the reveal command for that entity
+    	if (getGame().getOptions().booleanOption(OptionsConstants.ADVANCED_HIDDEN_UNITS)) {
+    		Entity target = getGame().getEntity(movedEntityID);
+
+    		// if the target is not hostile/destroyed/abandoned/"broken", we don't bother considering it
+    		// also, don't bother if the target can still move after this update
+    		if (target == null || target.isDestroyed() || target.isAbandoned()
+    				|| (target.turnWasInterrupted() && !target.isDone())
+    				|| !target.getOwner().isEnemyOf(getLocalPlayer())
+    				|| getHonorUtil().isEnemyBroken(movedEntityID, target.getOwnerId(), getForcedWithdrawal())) {
+    			return;
+    		}
+
+    		for (Entity shooter : getGame().getEntitiesVector()) {
+    			// if the shooter is hidden, owned by me, on the board and not already activating
+                if (shooter.isHidden() && shooter.getOwnerId() == getLocalPlayerNumber() &&
+                		(shooter.getPosition() != null) &&
+                		(shooter.getHiddenActivationPhase() == GamePhase.UNKNOWN)) {
+                	final Map<WeaponMounted, Double> ammoConservation = calcAmmoConservation(shooter);
+
+                	double maxDamage = FireControl.getMaxDamageAtRange(shooter,
+                			target.getPosition().distance(shooter.getPosition()), false, false);
+
+                	// if we're not going to do any damage, don't reveal
+                	if (maxDamage <= 0) {
+                		continue;
+                	}
+
+                	FiringPlan firingPlan = getFireControl(shooter).getBestFiringPlan(shooter, target, getGame(), ammoConservation);
+
+                	double percentage = firingPlan.getExpectedDamage() / maxDamage;
+
+                	// if the expected damage (% of max possible damage at that range)
+                	// is higher than our aggression value (e.g. aggression 7 means we tolerate 30%)
+                	// then reveal
+                	if (percentage > (1.0 - (getBehaviorSettings().getHyperAggressionValue() / 10.0))) {
+                		sendActivateHidden(shooter.getId(), GamePhase.FIRING);
+                	}
+                }
+    		}
+        }
+    }
+
+    /**
+     * Determines whether Princess should reroll initiative using the Tactical Genius special ability.
+     *
+     * <p>Initiative is won or lost by team rolls, so this compares Princess' team roll with the roll of every team
+     * holding an enemy player. Each player's own roll only orders the players within a team and says nothing about
+     * who won.</p>
+     *
+     * <p>Princess scores her team's roll as the enemy teams it beats minus the enemy teams that beat it. A reroll costs
+     * her nothing but the roll she has, so she rerolls whenever the score she can expect from a fresh 2d6 (plus her
+     * team's bonus) is higher than the score she has now. Against a single enemy that means a lost initiative is
+     * always rerolled, unless no fresh roll could even tie.</p>
+     *
+     * <p>Under individual initiative every unit rolls on its own, so there is no single team roll to judge and
+     * Princess does not reroll.</p>
+     *
+     * @return {@code true} if Tactical Genius should be used to reroll initiative
+     */
+    @Override
+    protected boolean decideToRerollInitiative() {
+        Player me = getLocalPlayer();
+        final Game currentGame = getGame();
+
+        if (!currentGame.hasTacticalGenius(me) || rerolledInitiative) {
+            return false;
+        }
+
+        if (currentGame.getOptions().booleanOption(OptionsConstants.RPG_INDIVIDUAL_INITIATIVE)) {
+            LOGGER.info("[TacticalGenius] {}: individual initiative is on, no team roll to reroll", getName());
+            return false;
+        }
+
+        Team myTeam = currentGame.getTeamForPlayer(me);
+        if ((myTeam == null) || (myTeam.getInitiative().size() == 0)) {
+            LOGGER.info("[TacticalGenius] {}: no team initiative roll known, not rerolling", getName());
+            return false;
+        }
+
+        InitiativeRoll myTeamRoll = myTeam.getInitiative();
+        int lastIndex = myTeamRoll.size() - 1;
+        int myRoll = myTeamRoll.getRoll(lastIndex);
+        int myBonus = myTeamRoll.getBonus(lastIndex);
+        List<Integer> enemyRolls = new ArrayList<>();
+        for (Team team : currentGame.getTeams()) {
+            if (!team.equals(myTeam) && isEnemyTeam(team, me) && (team.getInitiative().size() > 0)) {
+                enemyRolls.add(getLastInitiativeRoll(team.getInitiative()));
+            }
+        }
+
+        boolean reroll = shouldRerollInitiative(myRoll, myBonus, enemyRolls);
+        LOGGER.info("[TacticalGenius] {}: team total {} (bonus {}) vs enemy team totals {}: wins={} losses={} "
+                    + "score={} expected score on reroll={} reroll={}",
+              getName(), myRoll, myBonus, enemyRolls, countWins(myRoll, enemyRolls),
+              countLosses(myRoll, enemyRolls), initiativeScore(myRoll, enemyRolls),
+              expectedScoreOnReroll(myBonus, enemyRolls), reroll);
+        return reroll;
+    }
+
+    /**
+     * Decides whether a Tactical Genius reroll is worth spending, given the team initiative totals.
+     *
+     * @param myRoll     Princess' current team initiative total (dice plus bonus)
+     * @param myBonus    the bonus that will be added to a rerolled 2d6
+     * @param enemyRolls the initiative totals of the enemy teams
+     *
+     * @return {@code true} only if the score Princess can expect from a reroll is higher than her current score
+     */
+    static boolean shouldRerollInitiative(int myRoll, int myBonus, List<Integer> enemyRolls) {
+        // Compare in whole numbers (36ths) so an exactly equal expectation is never mistaken for a gain
+        return totalScoreOverAllRerolls(myBonus, enemyRolls) > (initiativeScore(myRoll, enemyRolls) * OUTCOMES_ON_2D6);
+    }
+
+    /**
+     * @param myRoll     an initiative total
+     * @param enemyRolls the initiative totals of the enemy teams
+     *
+     * @return the number of enemy teams the roll beats minus the number that beat it; a tie counts as neither
+     */
+    static int initiativeScore(int myRoll, List<Integer> enemyRolls) {
+        return countWins(myRoll, enemyRolls) - countLosses(myRoll, enemyRolls);
+    }
+
+    /**
+     * @return {@code true} if any player on the team is an enemy of the given player
+     */
+    private static boolean isEnemyTeam(Team team, Player localPlayer) {
+        if (team.isObserverTeam()) {
+            return false;
+        }
+        for (Player player : team.players()) {
+            if (player.isEnemyOf(localPlayer)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Retrieves the most recent total of an initiative roll sequence.
+     *
+     * @param roll the initiative roll sequence
+     *
+     * @return the last roll's total, or {@code 0} if no roll exists
+     */
+    private static int getLastInitiativeRoll(InitiativeRoll roll) {
+        if (roll == null || roll.size() == 0) {
+            return 0;
+        }
+        return roll.getRoll(roll.size() - 1);
+    }
+
+    /**
+     * Counts how many enemy initiative rolls Princess' roll beats.
+     *
+     * @param myRoll     the initiative roll to compare
+     * @param enemyRolls the list of enemy initiative rolls to compare against
+     *
+     * @return the number of enemy rolls that are lower than myRoll
+     */
+    static int countWins(int myRoll, List<Integer> enemyRolls) {
+        int wins = 0;
+        for (int roll : enemyRolls) {
+            if (myRoll > roll) {
+                wins++;
+            }
+        }
+        return wins;
+    }
+
+    /**
+     * Counts how many enemy initiative rolls beat Princess' roll.
+     *
+     * @param myRoll     the initiative roll to compare
+     * @param enemyRolls the list of enemy initiative rolls to compare against
+     *
+     * @return the number of enemy rolls that are higher than myRoll
+     */
+    static int countLosses(int myRoll, List<Integer> enemyRolls) {
+        int losses = 0;
+        for (int roll : enemyRolls) {
+            if (myRoll < roll) {
+                losses++;
+            }
+        }
+        return losses;
+    }
+
+    /**
+     * Calculates the score Princess can expect if she rerolls: the average of {@link #initiativeScore} over every 2d6
+     * result, weighted by how likely each result is, with her team's bonus added to the dice.
+     *
+     * @param myBonus    the bonus added to the rerolled dice
+     * @param enemyRolls the initiative totals of the enemy teams
+     *
+     * @return the expected score after a reroll, from minus the number of enemy teams to plus that number
+     */
+    static double expectedScoreOnReroll(int myBonus, List<Integer> enemyRolls) {
+        return (double) totalScoreOverAllRerolls(myBonus, enemyRolls) / OUTCOMES_ON_2D6;
+    }
+
+    /**
+     * @return the sum of {@link #initiativeScore} over all 36 ways two dice can fall, with the bonus added
+     */
+    private static int totalScoreOverAllRerolls(int myBonus, List<Integer> enemyRolls) {
+        int totalScore = 0;
+        for (int dice = 2; dice <= 12; dice++) {
+            totalScore += WAYS_TO_ROLL_ON_2D6[dice] * initiativeScore(dice + myBonus, enemyRolls);
+        }
+        return totalScore;
+    }
+}

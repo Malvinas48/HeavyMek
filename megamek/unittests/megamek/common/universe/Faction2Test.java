@@ -1,0 +1,185 @@
+/*
+ * Copyright (C) 2025-2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MegaMek.
+ *
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+package megamek.common.universe;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertIterableEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.IOException;
+import java.util.List;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import megamek.client.ratgenerator.FactionRecord;
+import org.junit.jupiter.api.Test;
+
+class Faction2Test {
+
+    static Factions2 getTestFactions2() {
+        return new Factions2("testresources/data/universe/factions");
+    }
+
+    @Test
+    void isActiveInYear() {
+        // A faction with no active year entries must count as always active
+        var faction1 = new Faction2();
+        assertTrue(faction1.isActiveInYear(1000));
+        assertTrue(faction1.isActiveInYear(2000));
+        assertTrue(faction1.isActiveInYear(3000));
+        assertTrue(faction1.isActiveInYear(4000));
+
+        faction1.getYearsActive().add(new FactionRecord.DateRange(null, 2500));
+        assertTrue(faction1.isActiveInYear(1000));
+        assertTrue(faction1.isActiveInYear(2000));
+        assertFalse(faction1.isActiveInYear(3000));
+        assertFalse(faction1.isActiveInYear(4000));
+
+        var faction2 = new Faction2();
+        faction2.getYearsActive().add(new FactionRecord.DateRange(100, 200));
+        assertFalse(faction2.isActiveInYear(1000));
+        assertFalse(faction2.isActiveInYear(2000));
+        assertFalse(faction2.isActiveInYear(3000));
+        assertFalse(faction2.isActiveInYear(4000));
+    }
+
+    @Test
+    void testPerformsBatchall() {
+        var testFactions = getTestFactions2();
+        var cbsFaction = testFactions.getFaction("CBS");
+        assertTrue(cbsFaction.isPresent());
+        assertTrue(cbsFaction.get().performsBatchalls());
+
+        var laFaction = testFactions.getFaction("LA");
+        assertTrue(laFaction.isPresent());
+        assertFalse(laFaction.get().performsBatchalls());
+    }
+
+    @Test
+    void getSucsCodesReturnsEmptySetByDefault() {
+        Faction2 faction = new Faction2();
+        assertTrue(faction.getSucsCodes().isEmpty());
+    }
+
+    @Test
+    void isMilitiaReflectsTheMilitiaTag() {
+        Faction2 faction = new Faction2();
+        assertFalse(faction.isMilitia());
+
+        faction.getTags().add(FactionTag.MILITIA);
+        assertTrue(faction.isMilitia());
+    }
+
+    @Test
+    void sucsCodesParsedFromYamlPreservingOrder() {
+        Factions2 testFactions = getTestFactions2();
+        Faction2 laFaction = testFactions.getFaction("LA").orElseThrow();
+        assertIterableEquals(List.of("LA", "LC"), laFaction.getSucsCodes());
+
+        Faction2 cbsFaction = testFactions.getFaction("CBS").orElseThrow();
+        assertTrue(cbsFaction.getSucsCodes().isEmpty());
+    }
+
+    @Test
+    void sucsCodesEmptyListInYamlParsesCleanly() {
+        Factions2 testFactions = getTestFactions2();
+        Faction2 mercFaction = testFactions.getFaction("MERC").orElseThrow();
+        assertTrue(mercFaction.getSucsCodes().isEmpty());
+    }
+
+    @Test
+    void aliasesParsedFromYaml() {
+        Factions2 testFactions = getTestFactions2();
+        Faction2 mergedFaction = testFactions.getFaction("MRG").orElseThrow();
+        assertEquals("OLDCODE", mergedFaction.getAliases().get(3080));
+        assertEquals("LA", mergedFaction.getAliases().get(3141));
+    }
+
+    @Test
+    void aliasResolvesToCanonicalFaction() {
+        Factions2 testFactions = getTestFactions2();
+        Faction2 mergedFaction = testFactions.getFaction("MRG").orElseThrow();
+        // A retired code with no faction file of its own resolves to the surviving faction via the alias.
+        assertSame(mergedFaction, testFactions.getFaction("OLDCODE").orElseThrow());
+    }
+
+    @Test
+    void realFactionWinsOverCollidingAlias() {
+        Factions2 testFactions = getTestFactions2();
+        // MRG declares LA as an alias, but LA is a real faction and must win the lookup.
+        Faction2 laFaction = testFactions.getFaction("LA").orElseThrow();
+        assertEquals("Lyran Commonwealth", laFaction.getName());
+    }
+
+    @Test
+    void iconAndBackgroundResolveByYear() {
+        Factions2 testFactions = getTestFactions2();
+        Faction2 mergedFaction = testFactions.getFaction("MRG").orElseThrow();
+        // No-arg getters return the base value.
+        assertEquals("base_icon.png", mergedFaction.getIcon());
+        assertEquals("base_background.png", mergedFaction.getBackground());
+        // Before the change year, the year-aware getters fall back to the base value.
+        assertEquals("base_icon.png", mergedFaction.getIcon(3050));
+        assertEquals("base_background.png", mergedFaction.getBackground(3050));
+        // From the change year onward, the era value applies.
+        assertEquals("era_icon.png", mergedFaction.getIcon(3080));
+        assertEquals("era_icon.png", mergedFaction.getIcon(3200));
+        assertEquals("era_background.png", mergedFaction.getBackground(3200));
+    }
+
+    @Test
+    void legacyLogoFieldsAreReadSeparatelyFromIcons() throws IOException {
+        Faction2 faction = new ObjectMapper(new YAMLFactory()).readValue("""
+              key: OLD
+              name: Old Faction
+              logo: Periphery/Aurigan Coalition.png
+              logoChanges:
+                3080: Periphery/Aurigan Directorate.png
+              icon: logo_aurigan_coalition.png
+              """, Faction2.class);
+
+        assertEquals("logo_aurigan_coalition.png", faction.getIcon(3080));
+        assertEquals("Periphery/Aurigan Coalition.png", faction.getLegacyLogo(3079));
+        assertEquals("Periphery/Aurigan Directorate.png", faction.getLegacyLogo(3080));
+    }
+
+    @Test
+    void factionWithoutLegacyLogoHasNone() {
+        Faction2 mergedFaction = getTestFactions2().getFaction("MRG").orElseThrow();
+
+        assertNull(mergedFaction.getLegacyLogo(3080));
+    }
+}
