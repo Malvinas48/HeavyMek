@@ -2,7 +2,7 @@
 
 This is a living document. It records the decisions made so far, how the pieces fit together, and the plan in stages. Update it whenever a decision changes or a stage is done.
 
-**Status (8 Nov 2026):** MegaMek 0.51.01.5 has been imported. Stage 0 needs the build download sites allowed in claude.ai settings. Stage 1 needs the Heavy Gear 2nd Edition rulebook PDF.
+**Status (8 Nov 2026):** Stage 0 is done: HeavyMek builds, starts under its own name and carries only the data it needs. Stage 1 (reading the rules) is under way.
 
 ## Decisions
 
@@ -14,10 +14,15 @@ This is a living document. It records the decisions made so far, how the pieces 
 | 2026-11-08 | Claude **builds and tests in the cloud** once Maven Central and the Gradle sites are allowed | Writing Java against about 950,000 lines of code without compiling would be guesswork. |
 | 2026-11-08 | Gears, weapons and scenarios are **plain text files** | They're easy to read, tweak and add to by hand. |
 | 2026-11-08 | The repository stays **private** | Heavy Gear's unit stats are Dream Pod 9's material. |
+| 2026-11-08 | Main rules text: the **Tactical Miniatures Rules, 2nd Edition (2005)**; hex details from the **1997 rulebook** | The 2005 book is Dream Pod 9's own revision of the same 2nd Edition tactical game, its text is clean, and it still counts one movement point as one hex (one hex = 50 m). The 1997 rulebook covers hex facing, stacking and mapboards. |
+| 2026-11-08 | Keep a trimmed copy of MegaMek's data in `megamek/data` (about 150 MB) | One clone is enough to build and play; no separate data repository. |
+| 2026-11-08 | Default terrain tileset: MegaMek's **saxarba** | The best-looking tileset. The lighter ones (27 MB) can replace it if the repository gets too big. |
 
 ## Sources
 
-- *Heavy Gear Rulebook, 2nd Edition* (DP9-101, 1997) has the tactical rules. It's sold as a PDF on DriveThruRPG.
+- *Heavy Gear Tactical Miniatures Rules, 2nd Edition* (Dream Pod 9, 2005): the main text for the tactical rules.
+- *Heavy Gear Rulebook, 2nd Edition* (DP9-101, 1997): the original hex-map tactical rules (chapter 7) and the Field Guide with Gear and weapon stats. It's sold as a PDF on DriveThruRPG.
+- *Terra Nova Companion*: setting background (cities and regions), for scenario flavour later.
 - *Technical Manual, 2nd Edition* (DP9-104, a "Heavy Gear Revitalized" PDF on DriveThruRPG) covers vehicle construction and technology, for later stages.
 - More Gear stats will come from the 2nd Edition vehicle books in a later stage.
 - Rule notes in this repository paraphrase the books and cite page numbers. They never copy them.
@@ -67,13 +72,13 @@ The trade-off we accepted: once BattleTech is gone, pulling future MegaMek fixes
 
 Each stage ends with something you can try.
 
-### Stage 0: Foundation
+### Stage 0: Foundation (done, 8 Nov 2026)
 
-- The build works with Java 21 and Gradle, both in the cloud and on your PC.
-- Replace the dependency on MegaMek's separate data repository (`mm-data`, expected at `../mm-data`) with a copy of only what HeavyMek needs, kept in this repository: hex terrain tiles, boards, fonts and interface images (credited, CC BY-NC-SA 4.0). Leave out BattleTech units, unit art and random assignment tables. Right now `/megamek/data` is git-ignored because MegaMek fills it from `mm-data` at build time.
-- Switch off everything that talks to MegaMek's servers: Sentry crash reporting and server-browser (metaserver) registration.
-- Show "HeavyMek" in the window title and on the main menu.
-- **Done when:** HeavyMek builds and opens its main menu on your PC.
+- The build works with Java 21 and Gradle, in the cloud and on your PC: `./gradlew run`, `./gradlew installDist`, `./gradlew test`. MegaMek's suite-release tooling, Windows .exe wrapper and style checks are gone.
+- `megamek/data` holds a trimmed copy of MegaMek's data repository (`mm-data` commit 5b184977, CC BY-NC-SA 4.0): fonts, the saxarba terrain tiles, the interface skins' images and what the board display needs. BattleTech units, unit art, portraits, camouflage, record sheets, universe data and map packs are left out. See `megamek/data/README.md`.
+- Sentry crash reporting is removed, and registering games on MegaMek's server browser is hidden.
+- The window, main menu and welcome dialog say HeavyMek. The splash screen, logo and icons are placeholders drawn by `tools/make_placeholder_art.py`.
+- Checked by launching the installed game on a virtual display and opening the Map Editor (`tools/ui-check`).
 
 ### Stage 1: Read the rules
 
@@ -101,6 +106,11 @@ Initiative and activation of combat groups, leadership and command, indirect fir
 ### Stage 5: BattleTech demolition
 
 Steps 2 to 4 of "Removing BattleTech". This can start once Stage 2 works and run alongside the later stages.
+
+Already noticed along the way:
+- The main menu's "Quick Tip" lines are BattleTech tips.
+- `megamek/docs` is MegaMek's BattleTech documentation.
+- The game still scans for BattleTech unit files at startup and finds none.
 
 ### Stage 6: Forces
 
@@ -142,5 +152,5 @@ weapons:
 - The hex scale and height levels (Stage 1, from the rulebook).
 - How the rulebook's turn sequence maps onto MegaMek's phases (Stage 1).
 - Which Gears fight the first duel (Stage 1). The classic Hunter vs. Jäger matchup is the obvious pick.
-- Where Heavy Gear data files live once `mm-data` is gone (Stage 0).
+- Where Heavy Gear data files live: proposed `megamek/data/heavygear/` (units, weapons, scenarios), next to the other game data.
 - Java package names. New code goes in `megamek.*` packages next to SBF for now. Renaming everything to `heavymek.*` is cosmetic and can wait.

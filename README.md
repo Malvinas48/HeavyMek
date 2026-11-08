@@ -2,7 +2,7 @@
 
 HeavyMek turns [MegaMek](https://github.com/MegaMek/megamek), the open-source computer version of the BattleTech board game, into a computer version of **Heavy Gear's classic tactical game** (Heavy Gear 2nd Edition, Dream Pod 9, 1997). You play on hex maps, using the map editor, lobby and network play that MegaMek already has.
 
-> **Status: just getting started.** This repository holds an unmodified copy of MegaMek 0.51.01.5 plus HeavyMek's plan. It doesn't build yet and doesn't play Heavy Gear yet. [DESIGN.md](DESIGN.md) has the plan, stage by stage, and where things stand.
+> **Status: Stage 0 done.** HeavyMek builds, starts under its own name with placeholder art, and carries only the data it needs. It doesn't play anything yet: the BattleTech units are gone and the Heavy Gear rules arrive in Stage 2. [DESIGN.md](DESIGN.md) has the plan, stage by stage.
 
 ## The idea in one picture
 
@@ -10,12 +10,20 @@ Think of MegaMek as a game console with BattleTech as the cartridge. The console
 
 ## What you'll need
 
-- **Java 21.** On Arch or CachyOS: `sudo pacman -S jdk21-openjdk`.
+- **Java 21.** On Arch or CachyOS, install it with `sudo pacman -S jdk21-openjdk`. Then make it the default with `sudo archlinux-java set java-21-openjdk`, because HeavyMek won't start on Java 17.
 - **The Heavy Gear 2nd Edition rulebook**, if you want to know the rules. HeavyMek doesn't include Dream Pod 9's books; the PDFs are sold on DriveThruRPG.
 
-## Building
+## Building and running
 
-You can't build it yet. MegaMek's build expects its separate data repository (`mm-data`) to sit next to it. Stage 0 in [DESIGN.md](DESIGN.md) replaces that with the few files HeavyMek needs.
+From the repository folder:
+
+```sh
+./gradlew run          # start HeavyMek straight from the source code
+./gradlew installDist  # build a playable copy in megamek/build/install/HeavyMek
+./gradlew test         # run the automated tests
+```
+
+To play the built copy, run `megamek/build/install/HeavyMek/HeavyMek.sh`. The first build downloads Gradle and HeavyMek's libraries, so it takes a few minutes.
 
 ## Credits and licensing
 
