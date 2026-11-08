@@ -7,7 +7,7 @@ These notes are the rulebook as a programmer needs it: every rule, number and ta
 | [01-core-movement.md](01-core-movement.md) | Dice, skills, crews, the datacard, the combat round, command points, actions, movement, terrain, elevation, line of sight, sensors, firing arcs |
 | [02-combat-damage.md](02-combat-damage.md) | Attack and defense rolls, every modifier, physical attacks, indirect fire, rate of fire, damage, the systems damage tables, worked examples |
 | [03-units-weapons.md](03-units-weapons.md) | The vehicle stat block, weapons, perks and flaws, threat values, infantry in brief |
-| [units/](units/) | Draft unit files for the first duel (Hunter and Jäger) |
+| [../../megamek/data/heavygear/units/](../../megamek/data/heavygear/units/) | The unit files for the first duel (Hunter and Jäger), now game data |
 
 ## How to read them
 

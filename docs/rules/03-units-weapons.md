@@ -11,7 +11,7 @@ Scope: what a Heavy Gear vehicle record holds and how to store it as a plain-tex
   - Chapter 7, Tactical Rules: PDF = book page + 154 (p.125 = PDF 279, p.163 = PDF 317).
   - Chapters 8-9, Campaigning and Field Guide: PDF = book page + 230 (p.169 = PDF 399, p.188 = PDF 418, p.229 = PDF 459).
 - Markers, as in notes 01 and 02: **DIFF:** = the books disagree (or one contradicts itself). **UNCLEAR:** = not stated, ambiguous or illegible. **Implementation note:** = advice for the HeavyMek data format (my suggestion, not a rule from either book).
-- Which book wins is set in [README.md](README.md): B wins where the books differ, and A fills B's gaps. The unit files in [units/](units/) use B's value and keep A's differing value as a `DIFF:` comment. (These notes were drafted with A as the base text, so read every DIFF with that policy in mind.)
+- Which book wins is set in [README.md](README.md): B wins where the books differ, and A fills B's gaps. The unit files in [megamek/data/heavygear/units/](../../megamek/data/heavygear/units/) use B's value and keep A's differing value as a `DIFF:` comment. (These notes were drafted with A as the base text, so read every DIFF with that policy in mind.)
 - Scale: 1 hex = 1 inch in A = 50 m. 1 MP = one Clear hex, about 6 kph. Sensor and comm ranges are in km; hexes = km x 20 (A p.6, p.8; B p.212 / PDF 442 prints "40 hexes/2 km" and "200 hexes/10 km").
 
 ### 0.1 What is where (for later stages)
@@ -125,7 +125,7 @@ Notes 01 section 2.2 already explains the A datacard fields, decodes A's Grizzly
 
 ### 1.5 Suggested unit-file conventions (Implementation note)
 
-- One file per variant. Keys as in `gears/hunter.yaml`: `name, model, productionCode, faction, type, size, crew, actions, armor, maneuver, fireControl, sensors{rating,rangeKm}, communications{rating,rangeKm}, movement{primary, walker{combat,top}, ground{combat,top}}, threatValue, tvParts{offensive,defensive,miscellaneous}, perks[], flaws[], weapons[]`.
+- One file per variant. Keys as in `megamek/data/heavygear/units/hunter.yaml`: `name, model, productionCode, faction, type, size, crew, actions, armor, maneuver, fireControl, sensors{rating,rangeKm}, communications{rating,rangeKm}, movement{primary, walker{combat,top}, ground{combat,top}}, threatValue, tvParts{offensive,defensive,miscellaneous}, perks[], flaws[], weapons[]`.
 - Perk and flaw entries as objects: `{name, count, rating, option, aux, facing, note}` (for example `option: Desert` for Hostile Environment Protection, `facing: F` for Reinforced Armor, `count: 2` for paired arms).
 - Weapon entries: `{name, model, code, arc, quantity, accuracy, damage, baseRange, rangeBands[4], rateOfFire, ammo, special[]}`. Keep `special` as tags from section 2.3, and keep the code so the loader can fill missing values from a shared weapon table.
 - Derived values (armor thresholds, range in hexes, crew-adjusted TV) are better computed by the loader than stored.
@@ -473,7 +473,7 @@ Background or roleplaying only (B says so, or the effect is outside a battle): A
 
 ## 4. Gears for the first duel: Hunter and Jäger
 
-The Hunter (Northern) and the Jäger (Southern) are the two basic trooper Gears. B's Jäger text describes the Jäger as a copy of the Hunter that the two sides keep matching change for change, and the numbers bear it out: same TV, armor, speeds, electronics and weapon types. That makes them a fair mirror match for a first duel. Draft unit files: `gears/hunter.yaml`, `gears/jager.yaml`.
+The Hunter (Northern) and the Jäger (Southern) are the two basic trooper Gears. B's Jäger text describes the Jäger as a copy of the Hunter that the two sides keep matching change for change, and the numbers bear it out: same TV, armor, speeds, electronics and weapon types. That makes them a fair mirror match for a first duel. Unit files: `megamek/data/heavygear/units/hunter.yaml` and `jager.yaml`.
 
 Sources: A datacards (Hunter A p.42 / PDF 43; Jäger A p.43 / PDF 44); B Field Guide description pages (Hunter B p.212 / PDF 442; Jäger B p.220 / PDF 450) and record sheets (Hunter B p.213 / PDF 443; Jäger B p.221 / PDF 451). Every value below was read from the page images.
 
