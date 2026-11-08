@@ -2,7 +2,7 @@
 
 This is a living document. It records the decisions made so far, how the pieces fit together, and the plan in stages. Update it whenever a decision changes or a stage is done.
 
-**Status (8 Nov 2026):** Stage 0 is done: HeavyMek builds, starts under its own name and carries only the data it needs. Stage 1 (reading the rules) is under way.
+**Status (8 Nov 2026):** Stage 0 is done: HeavyMek builds, starts under its own name and carries only the data it needs. Stage 1's rules notes are drafted in [docs/rules](docs/rules/README.md) and waiting for your review.
 
 ## Decisions
 
@@ -14,14 +14,14 @@ This is a living document. It records the decisions made so far, how the pieces 
 | 2026-11-08 | Claude **builds and tests in the cloud** once Maven Central and the Gradle sites are allowed | Writing Java against about 950,000 lines of code without compiling would be guesswork. |
 | 2026-11-08 | Gears, weapons and scenarios are **plain text files** | They're easy to read, tweak and add to by hand. |
 | 2026-11-08 | The repository stays **private** | Heavy Gear's unit stats are Dream Pod 9's material. |
-| 2026-11-08 | Main rules text: the **Tactical Miniatures Rules, 2nd Edition (2005)**; hex details from the **1997 rulebook** | The 2005 book is Dream Pod 9's own revision of the same 2nd Edition tactical game, its text is clean, and it still counts one movement point as one hex (one hex = 50 m). The 1997 rulebook covers hex facing, stacking and mapboards. |
+| 2026-11-08 | Where the books differ, the **1997 rulebook** wins; the **2005 Tactical Miniatures Rules** fill gaps | The 1997 rules are the hex-map game chosen. The 2005 book is Dream Pod 9's later revision of the same game: it has clean text and covers things the 1997 book leaves out. Both count one movement point as one hex (one hex = 50 m). (Revised the same day: the 2005 book was first chosen as the main text.) |
 | 2026-11-08 | Keep a trimmed copy of MegaMek's data in `megamek/data` (about 150 MB) | One clone is enough to build and play; no separate data repository. |
 | 2026-11-08 | Default terrain tileset: MegaMek's **saxarba** | The best-looking tileset. The lighter ones (27 MB) can replace it if the repository gets too big. |
 
 ## Sources
 
-- *Heavy Gear Tactical Miniatures Rules, 2nd Edition* (Dream Pod 9, 2005): the main text for the tactical rules.
-- *Heavy Gear Rulebook, 2nd Edition* (DP9-101, 1997): the original hex-map tactical rules (chapter 7) and the Field Guide with Gear and weapon stats. It's sold as a PDF on DriveThruRPG.
+- *Heavy Gear Rulebook, 2nd Edition* (DP9-101, 1997): the hex-map tactical rules (chapter 7) and the Field Guide with Gear and weapon stats. It wins where the books differ. It's sold as a PDF on DriveThruRPG.
+- *Heavy Gear Tactical Miniatures Rules, 2nd Edition* (Dream Pod 9, 2005): fills the gaps and clarifies the rules.
 - *Terra Nova Companion*: setting background (cities and regions), for scenario flavour later.
 - *Technical Manual, 2nd Edition* (DP9-104, a "Heavy Gear Revitalized" PDF on DriveThruRPG) covers vehicle construction and technology, for later stages.
 - More Gear stats will come from the 2nd Edition vehicle books in a later stage.
@@ -86,6 +86,7 @@ Each stage ends with something you can try.
 - Decide how the rules map onto MegaMek: the turn sequence and phases, the hex scale and height levels, and what a unit record holds.
 - Pick the Gears for the first duel and write their text files.
 - **Done when:** you've read the notes and agree with the mapping.
+- **Progress:** the notes, the mapping and draft Hunter and Jäger files are in `docs/rules`. Its README lists where the books disagree and how HeavyMek rules on open questions.
 
 ### Stage 2: First duel
 
