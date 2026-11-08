@@ -46,7 +46,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import javax.swing.SwingUtilities;
 
-import io.sentry.Sentry;
 import megamek.MMConstants;
 import megamek.client.AbstractClient;
 import megamek.client.Client;
@@ -251,7 +250,6 @@ public class QuickGameRunner {
                     logger.error("Game timed out");
                 }
             } catch (Exception e) {
-                Sentry.captureException(e);
                 logger.error("", e);
             } finally {
                 die();

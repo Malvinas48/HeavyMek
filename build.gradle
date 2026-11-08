@@ -14,84 +14,20 @@ allprojects {
     }
 }
 
-['suiteReleaseVersion', 'suiteMegaMekVersion', 'suiteMegaMekLabVersion', 'suiteMekHQVersion'].each { name ->
-    // Qualify with project: inside a closure, a bare hasProperty() inspects the closure itself.
-    if (!project.hasProperty(name)) {
-        return
-    }
-    if (name != 'suiteReleaseVersion' && !project.hasProperty('suiteReleaseVersion')) {
-        throw new GradleException("${name} requires suiteReleaseVersion")
-    }
-    def requested = project.property(name).toString()
-    if (!(requested ==~ /(?:0|[1-9][0-9]*)\.(?:[0-9]{2}|[1-9][0-9]{2,})\.(?:[0-9]{2}|[1-9][0-9]{2,})(?:\.[1-9][0-9]*)?/)) {
-        throw new GradleException("${name} must be canonical padded major.minor.patch[.revision] (e.g. 0.51.01 or 0.51.00.2); got ${requested}")
-    }
-    requested.split(/\./).each { component ->
-        try {
-            Integer.parseInt(component)
-        } catch (NumberFormatException e) {
-            throw new GradleException("${name} component exceeds Java int range: ${component}", e)
-        }
-    }
-}
-if (hasProperty('suiteReleaseVersion')) {
-    def versions = ['suiteMegaMekVersion', 'suiteMegaMekLabVersion', 'suiteMekHQVersion']
-            .collect { (findProperty(it) ?: property('suiteReleaseVersion')).toString() }
-    versions.add(property('suiteReleaseVersion').toString())
-    // A missing revision is 0, so 0.51.00 < 0.51.00.2 < 0.51.01.
-    def numeric = versions.collect { value ->
-        def parts = value.split(/\./).collect { part -> Integer.parseInt(part) }
-        while (parts.size() < 4) {
-            parts.add(0)
-        }
-        parts
-    }
-    if ((0..2).any { i ->
-        def different = (0..3).find { j -> numeric[i][j] != numeric[i + 1][j] }
-        different != null && numeric[i][different] > numeric[i + 1][different]
-    }) {
-        throw new GradleException('Suite product versions must satisfy MegaMek <= MegaMekLab <= MekHQ <= suite')
-    }
-    version = findProperty('suiteMegaMekVersion') ?: property('suiteReleaseVersion')
-}
-
+// HeavyMek still reports MegaMek's version number (megamek/resources/Version.properties), because save files
+// and network games compare it. HeavyMek's own version can come later.
 subprojects {
     Properties versionProperties = new Properties()
-    versionProperties.load(rootProject.file("megamek/resources/Version.properties").newDataInputStream())
-    def processedVersion = String.format("%d.%02d.%02d", Integer.parseInt(versionProperties.getProperty("major")), Integer.parseInt(versionProperties.getProperty("minor")), Integer.parseInt(versionProperties.getProperty("patch")))
-
-    // A suite build supplies its canonical version (with a Weekly revision such as 0.51.00.2) without changing
-    // tracked sources. Do not inherit the historic point-release revision from Version.properties in that case.
-    def suiteVersion = rootProject.findProperty('suiteReleaseVersion')
-    if (suiteVersion != null) {
-        suiteVersion = (rootProject.findProperty('suiteMegaMekVersion') ?: suiteVersion).toString()
-        processedVersion = suiteVersion
+    rootProject.file('megamek/resources/Version.properties').withInputStream { versionProperties.load(it) }
+    String gameVersion = String.format('%d.%02d.%02d',
+            Integer.parseInt(versionProperties.getProperty('major')),
+            Integer.parseInt(versionProperties.getProperty('minor')),
+            Integer.parseInt(versionProperties.getProperty('patch')))
+    String revision = versionProperties.getProperty('revision')?.trim()
+    if (revision && Integer.parseInt(revision) > 0) {
+        gameVersion += ".${revision}"
     }
 
-    // Optional fourth component, present only for a special point release such as 0.51.0.1. See the comment in
-    // megamek/resources/Version.properties.
-    def revisionProperty = versionProperties.getProperty("revision")
-    if (suiteVersion == null && revisionProperty != null && !revisionProperty.trim().isEmpty()) {
-        def parsedRevision = Integer.parseInt(revisionProperty.trim())
-        if (parsedRevision > 0) {
-            processedVersion = String.format("%s.%d", processedVersion, parsedRevision)
-        }
-    }
-
-    if (project.hasProperty("extraVersion")) {
-        processedVersion = String.format("%s-%s", processedVersion, project.getProperty('extraVersion'))
-    }
-
-    group = 'org.megamek'
-    version = processedVersion
-}
-
-
-// A properties_local.gradle file can be used to override any of the above options. For instance,
-// rootProject.ext.mmGitRoot = 'file:///path/to/local/repo' will cause the release target to clone a
-// local copy of the repository rather than downloading it.
-
-def localProperties = file('properties_local.gradle')
-if (localProperties.exists()) {
-    apply from: localProperties
+    group = 'heavymek'
+    version = gameVersion
 }

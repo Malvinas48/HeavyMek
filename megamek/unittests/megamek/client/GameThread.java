@@ -41,7 +41,6 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import io.sentry.Sentry;
 import megamek.client.bot.princess.Princess;
 import megamek.common.Player;
 import megamek.common.event.GameListenerAdapter;
@@ -117,7 +116,6 @@ class GameThread extends Thread implements CloseClientListener {
                 logger.error("Game timed out");
             }
         } catch (Exception e) {
-            Sentry.captureException(e);
             logger.error("", e);
         } finally {
             die();

@@ -43,7 +43,7 @@ public final class MMLoggingConstants {
     }
 
     // region General Constants
-    public static final String UNHANDLED_EXCEPTION = "Uncaught %s detected. Please open up an issue containing all logs, the game save file, and customs at https://github.com/MegaMek/megamek/issues . If Sentry is enabled, the error has also been logged.";
+    public static final String UNHANDLED_EXCEPTION = "Uncaught %s detected. Please open up an issue containing all logs, the game save file, and customs at https://github.com/MegaMek/megamek/issues .";
     public static final String UNHANDLED_EXCEPTION_TITLE = "Uncaught Exception %s";
     public static final String VERSION_PARSE_FAILURE = "Version Parsing Failure";
     // endregion General Constants

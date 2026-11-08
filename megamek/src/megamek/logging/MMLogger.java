@@ -37,7 +37,6 @@ package megamek.logging;
 import java.util.Objects;
 import javax.swing.JOptionPane;
 
-import io.sentry.Sentry;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -47,7 +46,7 @@ import org.apache.logging.log4j.spi.ExtendedLoggerWrapper;
 
 /**
  * <p>
- * Utility class to handle logging functions as well as reporting exceptions to Sentry. To deal with general
+ * Utility class to handle logging functions. (HeavyMek removed MegaMek's Sentry crash reporting.) To deal with general
  * recommendations of confirming log level before logging, additional checks are added to ensure we're only ever logging
  * data based upon the currently active log level.
  * </p>
@@ -62,7 +61,7 @@ import org.apache.logging.log4j.spi.ExtendedLoggerWrapper;
  * }</pre>
  * <p>
  * And then for use, use {@code LOGGER.info(message)} and pass a string to it. Currently supported levels include trace,
- * info, warn, debug, error, and fatal. Warn, Error and Fatal can take any Throwable for sending to Sentry and has an
+ * info, warn, debug, error, and fatal. Warn, Error and Fatal can take any Throwable to log and have an
  * overload for a title to allow for displaying of a dialog box.
  * </p>
  * <p>
@@ -163,7 +162,6 @@ public class MMLogger extends ExtendedLoggerWrapper {
      */
     public void warn(Throwable exception, String message, Object... args) {
         message = parametrizedStringIfEnabled(Level.WARN, message, args);
-        Sentry.captureException(exception);
         exLoggerWrapper.logIfEnabled(MMLogger.FQCN, Level.WARN, null, message, exception);
     }
 
@@ -188,7 +186,6 @@ public class MMLogger extends ExtendedLoggerWrapper {
      * @param args      Variable list of arguments for the message
      */
     public void debug(Throwable exception, String message, Object... args) {
-        Sentry.captureException(exception);
         message = parametrizedStringIfEnabled(Level.DEBUG, message, args);
         exLoggerWrapper.logIfEnabled(MMLogger.FQCN, Level.DEBUG, null, message, exception);
     }
@@ -200,7 +197,6 @@ public class MMLogger extends ExtendedLoggerWrapper {
      * @param message   Additional message.
      */
     public void error(Throwable exception, String message) {
-        Sentry.captureException(exception);
         exLoggerWrapper.logIfEnabled(MMLogger.FQCN, Level.ERROR, null, message, exception);
     }
 
@@ -213,7 +209,6 @@ public class MMLogger extends ExtendedLoggerWrapper {
      */
     public void error(Throwable exception, String message, Object... args) {
         message = parametrizedStringIfEnabled(Level.ERROR, message, args);
-        Sentry.captureException(exception);
         exLoggerWrapper.logIfEnabled(MMLogger.FQCN, Level.ERROR, null, message, exception);
     }
 
@@ -225,7 +220,6 @@ public class MMLogger extends ExtendedLoggerWrapper {
      */
     @Override
     public void error(String message, Throwable exception) {
-        Sentry.captureException(exception);
         exLoggerWrapper.logIfEnabled(MMLogger.FQCN, Level.ERROR, null, message, exception);
     }
 
@@ -248,7 +242,6 @@ public class MMLogger extends ExtendedLoggerWrapper {
      * @param args      Variable list of arguments for the message.
      */
     public void errorDialog(Throwable exception, String message, String title, Object... args) {
-        Sentry.captureException(exception);
         message = parametrizedStringAnyway(message, args);
         exLoggerWrapper.logIfEnabled(MMLogger.FQCN, Level.ERROR, null, message, exception);
         // An exception reached a dialog, so this is a defect rather than something the player can put right: offer
@@ -352,7 +345,6 @@ public class MMLogger extends ExtendedLoggerWrapper {
      * @param message   Message to report to the log file.
      */
     public void fatal(Throwable exception, String message) {
-        Sentry.captureException(exception);
         exLoggerWrapper.logIfEnabled(MMLogger.FQCN, Level.FATAL, null, message, exception);
     }
 

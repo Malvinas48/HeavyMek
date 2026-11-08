@@ -32,4 +32,5 @@
 # affiliated with Microsoft.
 
 CDPATH= cd -- "$(dirname -- "$0")/" || exit 1
-exec ./bin/MegaMek "$@"
+# HeavyMek: start the game from its own folder so it finds data/, mmconf/ and docs/.
+exec ./bin/HeavyMek "$@"

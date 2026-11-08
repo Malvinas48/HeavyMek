@@ -54,7 +54,6 @@ import javax.swing.SwingUtilities;
 import javax.swing.ToolTipManager;
 import javax.swing.UIManager;
 
-import io.sentry.Sentry;
 import jakarta.annotation.Nullable;
 import megamek.client.ui.clientGUI.ButtonOrderPreferences;
 import megamek.client.ui.clientGUI.MegaMekGUI;
@@ -95,20 +94,7 @@ public class MegaMek {
         originProject = MMConstants.PROJECT_NAME;
         ObjectInputFilter.Config.setSerialFilter(sanityInputFilter);
 
-        // Configure Sentry with defaults. Although the client defaults to enabled, the properties file is used to
-        // disable it and additional configuration can be done inside the sentry.properties file. The defaults for
-        // everything else is set here.
-        Sentry.init(options -> {
-            options.setEnableExternalConfiguration(true);
-            options.setDsn("https://b1720cb789ec56df7df9610dfa463c09@sentry.tapenvy.us/8");
-            options.setEnvironment("production");
-            options.setTracesSampleRate(1.0);
-            options.setProfilesSampleRate(1.0);
-            options.setEnableAppStartProfiling(true);
-            options.setDebug(true);
-            options.setServerName("MegaMekClient");
-            options.setRelease(SuiteConstants.VERSION.toString());
-        });
+        // HeavyMek: MegaMek's crash reporting (Sentry) is removed; errors only go to the local log.
 
         ToolTipManager.sharedInstance().setDismissDelay(Integer.MAX_VALUE);
 
