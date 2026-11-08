@@ -1,0 +1,92 @@
+# Jäger: Southern trooper Gear. Draft HeavyMek unit file.
+# Sources: A p.43 / PDF 44 (tactical datacard); A p.28-29 / PDF 29-30 (weapon tags);
+#          B p.220 / PDF 450 (description page, Game Statistics) and B p.221 / PDF 451 (record sheet).
+# Live values follow B (the 1997 rulebook wins, see docs/rules/README.md); where A differs, A's value is kept in a "DIFF:" comment.
+# All numbers were checked against the page images. See ../03-units-weapons.md section 4.
+# Printed TV assumes a Qualified crew (A p.3; B p.127). Crew skills belong to the scenario, not the unit.
+name: Jager                          # A prints "JAGER"; B prints "Jäger"
+model: Jäger (Alpha)                 # B p.220
+productionCode: OACS-01M/SU          # B p.220-221
+faction: south                       # A card banner "SOUTHERN MILICIA"; B: built by Territorial Arms
+type: gear
+size: 6
+crew: 1
+actions: 1                           # A "Actions: 1" = B "Bonus Actions: 0"
+armor: 15                            # thresholds Light 15 / Heavy 30 / Overkill 45 (B p.221)
+maneuver: 0
+fireControl: 0
+sensors: { rating: 0, rangeKm: 2 }          # 40 hexes (B p.220)
+communications: { rating: 0, rangeKm: 10 }  # 200 hexes (B p.220)
+movement:
+  primary: walker                    # A: first speed arrow; B: "Primary W"
+  walker: { combat: 4, top: 7 }
+  ground: { combat: 6, top: 12 }
+deploymentRangeKm: 500               # B p.221 only; no tactical effect
+threatValue: 380
+tvParts: { offensive: 450, defensive: 298, miscellaneous: 392 }  # B p.220; A p.30 chassis: 298 + 392 + punch 9 = 699
+perks:
+  - { name: Manipulator Arm, count: 2, rating: 6, note: "can punch, DM x6" }
+  - { name: Easy to Modify }
+  - { name: Hostile Environment Protection, option: Desert }   # B p.221. DIFF: A p.43 does not list it.
+flaws: []
+weapons:
+  - name: Light Autocannon
+    model: PR-25 Autocannon          # B p.221
+    code: LAC
+    arc: F
+    quantity: 1
+    accuracy: 0
+    damage: 8
+    baseRange: 2
+    rangeBands: [2, 4, 8, 16]
+    rateOfFire: 2
+    ammo: 60
+    special: []
+  - name: Light Rocket Pack/24
+    model: Vogel-6 Rocket Pod
+    code: LRP/24
+    arc: F
+    quantity: 1
+    accuracy: -1
+    damage: 12
+    baseRange: 1
+    rangeBands: [1, 2, 4, 8]
+    rateOfFire: 3
+    ammo: 24
+    special: [IF]
+  - name: Anti-Personnel Grenade Launcher
+    model: HLB-16 AP Grenade Launcher
+    code: APGL
+    arc: FF                          # B p.221 prints "Fixed F.", as on the Hunter. DIFF: A p.43 prints F
+    quantity: 1
+    accuracy: -1
+    damage: 3
+    baseRange: 1
+    rangeBands: [1, 2, 4, 8]
+    rateOfFire: 0
+    ammo: 6
+    special: [AI, IF, AE0]
+  - name: Hand Grenade
+    model: HG-2 Hand Grenade
+    code: HG
+    arc: F
+    quantity: 1                      # B sheet prints Qty 1; 3 grenades carried
+    accuracy: -1
+    damage: 15
+    baseRange: 0
+    rangeBands: [0, 0, 0, 0]
+    rateOfFire: 0
+    ammo: 3
+    special: [AI, THROWN]            # A p.29: thrown 1 hex with Piloting
+  - name: Vibroblade
+    model: HHVB-3 Vibroblade
+    code: VB
+    arc: F
+    quantity: 1
+    accuracy: 0
+    damage: 8
+    baseRange: 0
+    rangeBands: [0, 0, 0, 0]
+    rateOfFire: 0
+    ammo: null                       # melee, no ammunition
+    special: [MELEE, PHYSICAL_ONLY]  # B p.197: Physical Attack Only. DIFF: A p.29 gives Armor Piercing, lost when thrown (thrown 1 hex)
